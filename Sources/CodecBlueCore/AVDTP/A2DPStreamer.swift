@@ -81,10 +81,23 @@ public final class A2DPStreamer: @unchecked Sendable {
     ///
     /// Until now the buttons were only logged, so the headphones' volume keys did nothing: the
     /// listener reported "non riesco ad aumentare e abbassare il volume tramite le cuffie".
-    public var onKey: (@Sendable (String) -> Void)?
+    /// Called for every button; returns true when the press was acted on.
+    public var onKey: (@Sendable (String) -> Bool)?
 
     /// The absolute volume the headphones asked for, 0…1, from SET ABSOLUTE VOLUME.
     public var onAbsoluteVolume: (@Sendable (Float) -> Void)?
+
+    /// Sets the headphones' own attenuation, 0…1. Called when the Mac's slider moves.
+    ///
+    /// The headsets' volume keys do not reach us: measured 2026-11-06, pressing them produces no
+    /// AVRCP frame at all — they move their own DSP. What they do send is a steady GET
+    /// CAPABILITIES asking whether we support absolute volume. So the volume is ours to push
+    /// down the link, and until now we never did: the slider moved the gain in our own mixer and
+    /// the headphones stayed at whatever they were set to. That is the reported "mi aspettavo
+    /// agisse direttamente sul volume del Mac" — the two were independent.
+    public func setHeadphoneVolume(_ value: Float) {
+        avrcp?.setAbsoluteVolume(value)
+    }
 
     /// How much extra to read from the source, as a fraction of a block, to drain a backlog.
     ///
@@ -168,13 +181,24 @@ public final class A2DPStreamer: @unchecked Sendable {
         do {
             let channel = try await takeover.openChannel(psm: AVCTPHolder.psm, label: "avrcp", timeout: 3)
             let holder = AVCTPHolder(socket: ChannelSocket(channel: channel, label: "avrcp"))
+            // Byte-level tracing of the control channel, off unless asked for. It was on while
+            // the AVRCP frames were being got right, and it is the only reason the malformed
+            // frames were ever found — but it writes a line every two seconds forever, which
+            // buries everything else in the log. `CODECBLUE_AVRCP_TRACE=1` brings it back.
+            if ProcessInfo.processInfo.environment["CODECBLUE_AVRCP_TRACE"] == "1" {
+                holder.onRaw = { [log] bytes in
+                    let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                    log("AVRCP \(bytes.first == 0xFF ? "out" : "in"): \(hex)")
+                }
+            }
+            holder.registerVolumeNotifications()
             holder.onAbsoluteVolume = { [log, weak self] value in
                 log(String(format: "headphone volume: absolute %.0f%%", value * 100))
                 self?.onAbsoluteVolume?(value)
             }
             holder.onKey = { [log, weak self] key in
                 log("headphone button: \(key)")
-                self?.onKey?(key)
+                return self?.onKey?(key) ?? false
             }
             avrcp = holder
             log("AVRCP channel held")

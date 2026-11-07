@@ -457,21 +457,54 @@ func playSystem(_ address: String, options: [String]) async throws {
     // `let say = log` does not compile: Darwin's `log` (the maths one) is in scope too, so the
     // bare name is ambiguous. Naming the type resolves it.
     let say: @Sendable (String) -> Void = { message in log(message) }
-    streamer.onKey = { [volume, say] key in
+    // The transport buttons need Accessibility permission to post a media key, and that
+    // permission is granted to a *program*: asking from here would name the terminal. So the
+    // asking is done by `codecblue-keys`, a separate binary that does nothing else — see
+    // Sources/codecblue-keys/main.swift. If it was not built, the buttons stay unimplemented
+    // rather than silently accepted.
+    let mediaKeys = MediaKeyHelper(log: say)
+    if mediaKeys == nil {
+        say("media keys: codecblue-keys not found next to this binary, so the headphones' "
+            + "play/pause/next will be refused instead of accepted")
+    }
+    streamer.onKey = { [volume, say, mediaKeys] key in
         switch key {
         case "volume_up", "volume_down":
-            guard let volume else { return }
+            guard let volume else { return false }
             let delta: Float = key == "volume_up" ? 1.0 / 16 : -1.0 / 16
             if let position = volume.step(by: delta) {
                 say(String(format: "headphone volume button: slider %.0f%% -> gain %.1f%%",
                            position * 100, volume.gain * 100))
-            } else {
-                say("headphone volume button: the device refused the change")
+                return true
             }
+            say("headphone volume button: the device refused the change")
+            return false
+        case "play", "pause", "next", "previous", "stop":
+            // `stop` has no media key of its own: pause is the closest thing the system has, and
+            // pretending otherwise would need a second event nobody asked for.
+            let command = key == "stop" ? "pause" : key
+            guard let mediaKeys else {
+                say("headphone button \(key): no media key helper, so nothing was sent")
+                return false
+            }
+            mediaKeys.send(command)
+            say("headphone button \(key): forwarded to the system")
+            return true
         default:
-            break  // play/pause/next are the app's business, not ours
+            say("headphone button \(key): not handled")
+            return false
         }
     }
+    // The Mac's slider must reach the headphones, not just our own mixer. Measured 2026-11-06:
+    // the slider changed the gain we apply and the headphones kept their own attenuation, so the
+    // two volumes were independent — moving the slider did not move what the headphones do.
+    volume?.onChange = { [weak streamer] position in
+        streamer?.setHeadphoneVolume(position)
+    }
+    // The push at start-up cannot happen here: `setUp` is what opens the AVRCP channel, and it
+    // runs further down. Sending now would be a message to nobody — measured 2026-11-06, the
+    // log showed no outgoing frame at all until the channel existed. So it is sent right after
+    // `setUp`, below.
     streamer.onAbsoluteVolume = { [volume, say] value in
         guard let volume, let position = volume.set(position: value) else { return }
         say(String(format: "headphone volume: slider %.0f%% -> gain %.1f%%",
@@ -569,6 +602,13 @@ func playSystem(_ address: String, options: [String]) async throws {
     box.streamer = streamer
     // nil = take whatever the headphones offer; the device's own rate is only a preference.
     let configuration = try await streamer.setUp(sampleRate: ring.sampleRate, quality: quality)
+    // Now the AVRCP channel exists, so the headphones can be told the volume the Mac is at.
+    // Without this the two volumes are independent: the slider moves our gain and the headphones
+    // keep their own attenuation, which is exactly what was reported.
+    if let volume {
+        streamer.setHeadphoneVolume(volume.reported)
+        log(String(format: "headphones told to play at %.0f%% (the Mac's slider)", volume.reported * 100))
+    }
     // The device runs at 48 kHz and the headphones may take 44.1: convert rather than refuse.
     let resampler = Resampler(from: ring.sampleRate, to: configuration.sampleRate)
     if !resampler.isIdentity {

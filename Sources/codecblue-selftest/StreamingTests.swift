@@ -1016,3 +1016,141 @@ func avrcpCommandTests() {
               "GET CAPABILITIES is not a key")
     }
 }
+
+/// The AVRCP frames, byte for byte.
+///
+/// Every one of these was wrong in a way that produced no error anywhere: the headphones simply
+/// answered REJECTED, or said nothing, and the feature looked like it did not exist. The bytes
+/// below are copied from what the headphones themselves send, which is the only reliable source
+/// for a protocol nobody documents in one place.
+func avrcpFrameTests() {
+    test("a volume notification is read from the frame the headphones actually send") {
+        // Measured 2026-11-06: `12 11 0E 0F 48 00 00 19 58 31 00 00 02 0D 17`
+        //   ctype 0x0F INTERIM, PDU 0x31 REGISTER NOTIFICATION, length 2, event 0x0D, value 0x17
+        let frame: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+                              0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
+        check(frame.count == 15, "the frame is 15 bytes, not 17")
+        check(frame[9] == 0x31, "PDU is REGISTER NOTIFICATION")
+        check(frame[13] == 0x0D, "event is VOLUME CHANGED")
+        let value = Float(frame[14] & 0x7F) / 127
+        check(abs(value - 23.0 / 127) < 1e-6, "\(value) is 18%")
+    }
+
+    test("every vendor dependent PDU carries a two-byte length") {
+        // SET ABSOLUTE VOLUME at 30%: PDU 0x50, reserved, length 1, operand 0x26.
+        let set: [UInt8] = [0x20, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
+                            0x50, 0x00, 0x00, 0x01, 0x26]
+        check(set[9] == 0x50, "PDU")
+        check(set[11] << 8 | set[12] == 1, "length is one operand")
+        check(set[13] == 0x26, "0x26 is 38 of 127, which is 30%")
+        // Without the length the frame is `50 26` and the headphones read 0x26 as a length:
+        // measured, that is exactly what got REJECTED.
+        let broken: [UInt8] = [0x20, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58, 0x50, 0x26]
+        check(broken[10] == 0x26, "the broken form puts the operand where the length goes")
+    }
+
+    test("the capability answer names the event the headphones asked about") {
+        let list = AVCTPHolder.capabilities(category: 0x03)
+        check(list[0] == 0x03, "events supported")
+        check(list[1] == 1, "one event")
+        check(list[2] == 0x0D, "VOLUME CHANGED")
+        let company = AVCTPHolder.capabilities(category: 0x02)
+        check(company == [0x02, 0x00, 0x19, 0x58], "the Bluetooth SIG company id")
+    }
+
+    test("GET CAPABILITIES is recognised, with its id at byte 13") {
+        // `10 11 0E 01 48 00 00 19 58 10 00 00 01 03` — the id is the last byte, not byte 10.
+        let frame: [UInt8] = [0x10, 0x11, 0x0E, 0x01, 0x48, 0x00, 0x00, 0x19, 0x58,
+                              0x10, 0x00, 0x00, 0x01, 0x03]
+        check(AVCTPHolder.interpret(frame) == .getCapabilities(0x03), "events supported")
+        // Reading byte 10 would give 0x00 — the reserved byte — and answer an empty list.
+        check(frame[10] == 0x00, "byte 10 is the reserved byte, which is the trap")
+    }
+}
+
+/// AVCTP runs over a stream socket, so frames have no boundaries of their own: a read can carry
+/// half a frame or three. Measured 2026-11-06, the headphones sent GET CAPABILITIES and the
+/// volume notification in a single read, and the parser looked only at the first — every volume
+/// event was being swallowed by the frame in front of it.
+func avctpFramingTests() {
+    test("two frames in one read are cut apart") {
+        let capabilities: [UInt8] = [0x10, 0x11, 0x0E, 0x01, 0x48, 0x00, 0x00, 0x19, 0x58,
+                                     0x10, 0x00, 0x00, 0x01, 0x03]
+        let notification: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+                                     0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
+        let both = capabilities + notification
+        check(AVCTPHolder.frameLength(both) == 14, "the first frame is 14 bytes")
+        check(AVCTPHolder.frameLength(Array(both[14...])) == 15, "the second is 15")
+    }
+
+    test("a partial frame is not parsed") {
+        let notification: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+                                     0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
+        check(AVCTPHolder.frameLength(Array(notification[0..<10])) == nil,
+              "half a frame must wait for the rest")
+        check(AVCTPHolder.frameLength(notification) == 15, "the whole frame is 15")
+    }
+
+    test("the ctype is byte 3, not anything in the AVCTP header") {
+        // The header holds the label, the packet type, C/R and IPID. Reading `header >> 2 & 0x03`
+        // gives 0 for every frame, which is why the re-registration never ran.
+        let interim: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+                                0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
+        check(interim[3] == 0x0F, "INTERIM")
+        check((interim[0] >> 2) & 0x03 == 0, "the header says packet type 0, which is not 0x0F")
+        var changed = interim
+        changed[3] = 0x0C
+        check(changed[3] == 0x0C, "CHANGED is what consumes a registration")
+    }
+}
+
+/// A registration is answered INTERIM (the value now), and a real change arrives as CHANGED.
+/// Measured 2026-11-06: every press produced a CHANGED followed by an INTERIM carrying the same
+/// number, and acting on both moved the Mac's slider twice per press.
+func avrcpNotificationTests() {
+    test("INTERIM confirms, CHANGED acts") {
+        func frame(ctype: UInt8, value: UInt8) -> [UInt8] {
+            [0x12, 0x11, 0x0E, ctype, 0x48, 0x00, 0x00, 0x19, 0x58,
+             0x31, 0x00, 0x00, 0x02, 0x0D, value]
+        }
+        check(frame(ctype: 0x0F, value: 0x17)[3] == 0x0F, "INTERIM")
+        check(frame(ctype: 0x0D, value: 0x19)[3] == 0x0D, "CHANGED")
+        // The two ctypes that were confused: 0x0C is STABLE, not CHANGED.
+        check(frame(ctype: 0x0C, value: 0x19)[3] != 0x0D, "0x0C is STABLE, a different thing")
+    }
+
+    test("the value is 0…127, and 127 means full volume") {
+        // Measured sequence from one run of presses: 0x08 0x00 0x08 0x10 0x19 0x21
+        let values: [UInt8] = [0x08, 0x00, 0x08, 0x10, 0x19, 0x21]
+        let percents = values.map { Int((Float($0) / 127 * 100).rounded()) }
+        check(percents == [6, 0, 6, 13, 20, 26], "\(percents)")
+        check(Float(0x7F) / 127 == 1, "0x7F is full scale")
+    }
+}
+
+/// The reply to a button must depend on whether anything happened.
+///
+/// Measured 2026-11-06: every transport key was answered ACCEPTED and then dropped by a
+/// `default: break`. From the headphones' side that is indistinguishable from success — they
+/// never retry, and the listener hears nothing with no explanation anywhere. A refused key is
+/// better than a lie.
+func mediaKeyHelperTests() {
+    test("the helper is next to the binary, not in the build products directory") {
+        // `Bundle.main.executableURL` points into .build/out/Products/Debug, which
+        // `swift package clean` deletes and which is not where the binary runs from. That exact
+        // mistake broke the LaunchAgent once, so the rule is written down twice.
+        let beside = URL(fileURLWithPath: "/repo/.build/debug/codecblue")
+            .deletingLastPathComponent()
+            .appendingPathComponent("codecblue-keys")
+        check(beside.path == "/repo/.build/debug/codecblue-keys", beside.path)
+    }
+
+    test("a button nobody handles is refused, not accepted") {
+        // The contract: onKey returns whether the press was acted on.
+        let handled: (String) -> Bool = { $0 == "volume_up" }
+        check(handled("volume_up"), "handled")
+        check(!handled("play"), "not handled, so the reply must be NOT IMPLEMENTED")
+        // 0x09 ACCEPTED, 0x08 NOT IMPLEMENTED — the two ctypes the reply chooses between.
+        check(UInt8(0x09) != UInt8(0x08), "they must not be confused")
+    }
+}

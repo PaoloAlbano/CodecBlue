@@ -111,21 +111,17 @@ public final class SystemVolume: @unchecked Sendable {
         return muted
     }
 
+    /// Called whenever the slider moves, so the headphones can be told. The value is the slider
+    /// position, 0…1, not the gain: the headphones have their own decibel curve.
+    public var onChange: (@Sendable (Float) -> Void)?
+
     private func listen() {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioObjectPropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            let slider = Self.readVolume(device: self.device) ?? self.position
-            let decibels = Self.readDecibels(device: self.device)
-            let isMuted = Self.readMute(device: self.device) ?? self.muted
-            self.lock.lock()
-            self.position = slider
-            self.stored = decibels.map(Self.gain(fromDecibels:)) ?? Self.applyCurve(slider)
-            self.muted = isMuted
-            self.lock.unlock()
+            self?.refresh()
         }
         listener = block
         // A listener that never fires is silent, and the stream keeps the old gain forever. Ten
@@ -145,15 +141,27 @@ public final class SystemVolume: @unchecked Sendable {
         AudioObjectAddPropertyListenerBlock(device, &muteAddress, queue, block)
     }
 
+    /// Reads the device and publishes a change, from one place.
+    ///
+    /// `onChange` used to be called only from the property listener, and the listener does not
+    /// fire for every change — measured 2026-11-06, moving the slider from 30% to 80% updated the
+    /// gain (through this timer) but sent nothing to the headphones, because the listener block
+    /// never ran. The gain and the headphones were reading the same value through two different
+    /// paths, and only one of them worked.
+    ///
+    /// So the timer is the source of truth and the listener is only an accelerator: both call
+    /// this, and this is the only place that decides a change happened.
     private func refresh() {
         let slider = Self.readVolume(device: device) ?? position
         let decibels = Self.readDecibels(device: device)
         let isMuted = Self.readMute(device: device) ?? muted
         lock.lock()
+        let changed = abs(slider - position) > 0.001 || isMuted != muted
         position = slider
         stored = decibels.map(Self.gain(fromDecibels:)) ?? Self.applyCurve(slider)
         muted = isMuted
         lock.unlock()
+        if changed { onChange?(slider) }
     }
 
     private func removeListener() {

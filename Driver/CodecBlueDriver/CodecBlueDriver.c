@@ -690,6 +690,42 @@ static OSStatus driver_GetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
     }
 }
 
+// Tell the host the volume changed, on every object that carries it.
+//
+// This is why the Mac's volume slider did not follow the headphones' own keys. The old code sent
+// one notification, for `kDeviceObjectID`, carrying the selector it had just been given. But in
+// an AudioServerPlugIn the volume is a *control* with its own object ID (4, 5, 6), and the host
+// expects the notification on the control; the device-level volume the system shows is
+// synthesised by the HAL from the controls, and the HAL only re-reads them when a control says it
+// changed.
+//
+// Measured 2026-11-07: with the old code, a listener registered on the device's volume, on the
+// control's, on both, from the same process and from another one, never fired — not once, for any
+// write. The value was stored correctly and nothing ever announced it, so every client kept
+// showing the old number forever.
+static void volume_notify_changed(void) {
+    if (gDriver.host == NULL) { return; }
+    // The three controls, with the selector a level control actually has.
+    AudioObjectPropertyAddress control = {
+        kAudioLevelControlPropertyScalarValue,
+        kAudioObjectPropertyScopeOutput,
+        kAudioObjectPropertyElementMain
+    };
+    AudioObjectID controls[3] = { kVolumeControlID, kVolumeLeftID, kVolumeRightID };
+    gDriver.host->PropertiesChanged(gDriver.host, kDeviceObjectID, 3, controls);
+    for (int i = 0; i < 3; i++) {
+        gDriver.host->PropertiesChanged(gDriver.host, controls[i], 1, &control);
+    }
+    // And the device-level property the system reads. `kAudioDevicePropertyVolumeScalar` is a
+    // HAL-side selector, not part of the plug-in API, so it is spelled out: 'volm'.
+    AudioObjectPropertyAddress device = {
+        (AudioObjectPropertySelector)0x766F6C6D,  // 'volm'
+        kAudioObjectPropertyScopeOutput,
+        kAudioObjectPropertyElementMain
+    };
+    gDriver.host->PropertiesChanged(gDriver.host, kDeviceObjectID, 1, &device);
+}
+
 static OSStatus driver_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID,
                                        pid_t inClientProcessID,
                                        const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize,
@@ -703,11 +739,7 @@ static OSStatus driver_SetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
             uint32_t bits; memcpy(&bits, &value, sizeof(bits));
             atomic_store(&gDriver.volumeBits, bits);
             volume_save(value);
-            // Tell the host the value changed, or the slider will not follow.
-            if (gDriver.host != NULL) {
-                AudioObjectPropertyAddress changed = *inAddress;
-                gDriver.host->PropertiesChanged(gDriver.host, kDeviceObjectID, 1, &changed);
-            }
+            volume_notify_changed();
             return kAudioHardwareNoError;
         }
         case kAudioBooleanControlPropertyValue: {
