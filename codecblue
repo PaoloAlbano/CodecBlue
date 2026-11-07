@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs the development build from anywhere. `codecblue system ADDR` is the real use: it takes
+# whatever macOS is sending to the CodecBlue device and streams it to the headphones in LDAC.
+HERE=$(cd "$(dirname "$0")" && pwd)
+exec "$HERE/.build/debug/codecblue" "$@"

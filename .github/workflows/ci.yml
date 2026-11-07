@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build
+        run: swift build
+      - name: Unit tests
+        run: swift run codecblue-selftest
+      - name: Smoke test
+        run: .build/debug/codecblue version

@@ -1,0 +1,3 @@
+[submodule "third_party/libldac"]
+	path = third_party/libldac
+	url = https://android.googlesource.com/platform/external/libldac

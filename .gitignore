@@ -1,0 +1,23 @@
+# Build output
+.build/
+build/
+*.app
+*.driver
+*.dmg
+
+# macOS / editors
+.DS_Store
+*.xcuserstate
+xcuserdata/
+DerivedData/
+.swiftpm/
+.vscode/
+.domyn/
+
+# Leftovers of the Python prototype (root-owned caches may remain locally)
+daemon/
+__pycache__/
+*.pyc
+
+# Private notes, plans and research (not published)
+notes/

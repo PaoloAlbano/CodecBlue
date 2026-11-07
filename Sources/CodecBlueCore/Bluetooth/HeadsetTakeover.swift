@@ -1,0 +1,324 @@
+// Taking a pair of headphones over from macOS, and handing them back.
+//
+// The sequence and its timing constants come from Blue Bloom's measurements (MIT,
+// Copyright (c) 2026 Blue Bloom contributors), made with Focal Bathys, Sony WH-1000XM4
+// and others on macOS 26/27:
+//
+// * Headphones connected to macOS: force-disconnect. bluetoothd keeps the link about 2 s
+//   ("override disconnection timeout"), and a signaling request in that window is accepted
+//   on the same link. Our open channel then keeps the link up ("taking over in place").
+// * Headphones not connected: ask bluetoothd to connect them, let macOS connect their
+//   audio first (its round of profile connections cannot be stopped), then take over in
+//   place.
+// * Only one signaling request in flight at a time, one per XPC session (bluetoothd allows
+//   one channel request per session and device). A request unanswered for 2 s no longer
+//   holds the next one back.
+// * A grabbed channel that does not answer DISCOVER within 1.5 s is a fake: grab again.
+
+import Foundation
+
+public struct TakeoverTiming: Sendable {
+    public var raceInterval: TimeInterval = 0.04
+    public var requestStuckAfter: TimeInterval = 2
+    public var roundTimeout: TimeInterval = 6
+    public var systemGoneMaxWait: TimeInterval = 0.8
+    public var systemConnectWait: TimeInterval = 8
+    public var systemConnectSettle: TimeInterval = 0.3
+    public var discoverTimeout: TimeInterval = 1.5
+    public var inPlaceRetries = 2
+    public var raceSessions = 6
+    public static let measured = TakeoverTiming()
+}
+
+public enum TakeoverError: Error, CustomStringConvertible {
+    case notPaired(String)
+    case headphonesDidNotConnect
+    case notGrabbed(lastResult: Int?)
+    case fakeChannel
+
+    public var description: String {
+        switch self {
+        case let .notPaired(address): "\(address) is not known to this Mac (pair it in System Settings first)"
+        case .headphonesDidNotConnect: "the headphones did not connect (off, out of range, or busy with another device)"
+        case let .notGrabbed(result):
+            "could not take the headphones' audio channel from macOS" + (result.map { " (last result \($0))" } ?? "")
+        case .fakeChannel: "the headphones never answered on the grabbed channel"
+        }
+    }
+}
+
+public final class HeadsetTakeover: @unchecked Sendable {
+    public let address: String
+    public let timing: TakeoverTiming
+    public private(set) var device: UUID?
+    public private(set) var signalSession: ClassicXPCSession?
+    public private(set) var signaling: SignalingChannel?
+    /// True when the link was up before we started (macOS had the headphones).
+    public private(set) var wasConnected = false
+    /// bluetoothd's record from the start of the takeover (services, RFCOMM channels).
+    public private(set) var record: DeviceRecord?
+
+    /// Ask bluetoothd for a low-latency link when it has to connect the headphones. Only
+    /// takes effect on a fresh connection: bluetoothd computes the connection use case then,
+    /// and a link macOS already brought up keeps its sniff parameters.
+    public var lowLatency = false
+
+    private let log: @Sendable (String) -> Void
+    private var sessions: [ClassicXPCSession] = []
+    /// One XPC session per extra channel (bluetoothd allows one channel per session and
+    /// device), so that each can be closed on hand-back.
+    private var extraChannels: [(session: ClassicXPCSession, psm: UInt16)] = []
+    private var rfcommChannels: [(session: ClassicXPCSession, channel: UInt8)] = []
+
+    public init(address: String, timing: TakeoverTiming = .measured, log: @escaping @Sendable (String) -> Void) {
+        self.address = address
+        self.timing = timing
+        self.log = log
+    }
+
+    // MARK: - Grab
+
+    /// Takes the headphones' AVDTP signaling channel away from macOS.
+    public func grabSignaling() async throws -> SignalingChannel {
+        try await startSessions()
+        guard let device else { throw TakeoverError.notPaired(address) }
+        let control = sessions[0]
+
+        let record = try await control.lookup(address: address)
+        self.record = record
+        wasConnected = record.isLinkUp
+        if record.isLinkUp {
+            log("headphones connected to macOS: taking the link over in place")
+        } else {
+            log("headphones not connected: asking macOS to connect them first"
+                + (lowLatency ? " (low latency)" : ""))
+            control.connect(device, lowLatency: lowLatency)
+            try await waitForSystemConnection(control)
+        }
+
+        // Force macOS off the link once; a fake channel is retried on the same link.
+        control.cancelConnection(device, force: true)
+        await waitForSystemToLetGo(control)
+        for attempt in 0...timing.inPlaceRetries {
+            let (session, socket) = try await race(device)
+            let channel = SignalingChannel(socket: socket)
+            do {
+                _ = try await channel.command(.discover, timeout: timing.discoverTimeout)
+                signalSession = session
+                signaling = channel
+                log("signaling channel grabbed (MTU \(socket.outMTU))")
+                return channel
+            } catch {
+                log("grabbed channel did not answer DISCOVER (attempt \(attempt + 1)): \(error)")
+                channel.close()
+                session.closeChannel(device, psm: AVDTP.psm)
+            }
+        }
+        throw TakeoverError.fakeChannel
+    }
+
+    private func startSessions() async throws {
+        guard sessions.isEmpty else { return }
+        let sessions = (0..<timing.raceSessions).map { ClassicXPCSession(label: "race\($0)") }
+        for session in sessions { try await session.start() }
+        self.sessions = sessions
+        device = try? await sessions[0].lookup(address: address).uuid
+    }
+
+    private func waitForSystemConnection(_ control: ClassicXPCSession) async throws {
+        let deadline = Date().addingTimeInterval(timing.systemConnectWait)
+        while Date() < deadline {
+            let up = (try? await control.lookup(address: address).isLinkUp) ?? false
+            if up && SystemHeadphoneAudio.hasDevice(address: address) {
+                log("macOS connected the headphones' audio")
+                try await Task.sleep(for: .seconds(timing.systemConnectSettle))
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let up = (try? await control.lookup(address: address).isLinkUp) ?? false
+        if !up { throw TakeoverError.headphonesDidNotConnect }
+        log("link up but macOS did not publish the headphones' audio; taking over anyway")
+    }
+
+    /// After the forced disconnect, wait until coreaudiod drops the headphones' devices
+    /// (macOS's AVDTP channel is gone), at most `systemGoneMaxWait`.
+    private func waitForSystemToLetGo(_ control: ClassicXPCSession) async {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timing.systemGoneMaxWait {
+            if !SystemHeadphoneAudio.hasDevice(address: address) {
+                log(String(format: "macOS let go %.0f ms after the forced disconnect", Date().timeIntervalSince(start) * 1000))
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        log("macOS still lists the headphones' audio; grabbing anyway")
+    }
+
+    /// Requests the signaling channel, one request at a time, until one wins.
+    private func race(_ device: UUID) async throws -> (ClassicXPCSession, ChannelSocket) {
+        let results = RaceResults()
+        let deadline = Date().addingTimeInterval(timing.roundTimeout)
+        var inFlight: (session: Int, since: Date)?
+        var next = 0
+        var requests = 0
+        while Date() < deadline {
+            if let won = results.takeWinner() {
+                log("grabbed after \(requests) request(s)")
+                return (sessions[won.session], ChannelSocket(channel: won.channel, label: "avdtp-signal"))
+            }
+            if let current = inFlight, results.isFinished(current.session) {
+                inFlight = nil
+            }
+            let stuck = inFlight.map { Date().timeIntervalSince($0.since) > timing.requestStuckAfter } ?? false
+            if inFlight == nil || stuck {
+                let index = next % sessions.count
+                next += 1
+                if !results.isBusy(index) {
+                    results.begin(index)
+                    inFlight = (index, Date())
+                    requests += 1
+                    let session = sessions[index]
+                    Task {
+                        do {
+                            let channel = try await session.openChannel(device, psm: AVDTP.psm, timeout: 5)
+                            if !results.finish(index, channel: channel) {
+                                // Someone else already won: give this one back.
+                                close(channel.fd)
+                                session.closeChannel(device, psm: AVDTP.psm)
+                            }
+                        } catch {
+                            if case let ClassicXPCError.refused(code) = error { results.refused(index, code) } else {
+                                results.refused(index, nil)
+                            }
+                        }
+                    }
+                }
+            }
+            try await Task.sleep(for: .seconds(timing.raceInterval))
+        }
+        results.closeRound()
+        throw TakeoverError.notGrabbed(lastResult: results.lastRefusal)
+    }
+
+    // MARK: - More channels on the grabbed link
+
+    /// Asks bluetoothd to raise the ACL priority of the link, which is what keeps the
+    /// controller out of sniff mode. Returns false when this macOS release does not let us
+    /// (the message number is not known yet).
+    @discardableResult
+    public func requestHighPriority() -> Bool {
+        guard let device, let control = sessions.first else { return false }
+        return control.setACLHighPriority(device)
+    }
+
+    /// Opens another L2CAP channel to the headphones (AVDTP media, AVRCP...) in its own XPC
+    /// session.
+    public func openChannel(psm: UInt16, label: String, priority: Int64 = 0,
+                            timeout: TimeInterval = 5) async throws -> OpenedChannel {
+        guard let device else { throw TakeoverError.notPaired(address) }
+        let session = ClassicXPCSession(label: label)
+        try await session.start()
+        do {
+            let channel = try await session.openChannel(device, psm: psm, priority: priority, timeout: timeout)
+            extraChannels.append((session, psm))
+            return channel
+        } catch {
+            session.invalidate()
+            throw error
+        }
+    }
+
+    /// Opens an RFCOMM channel to the headphones in its own XPC session.
+    public func openRFCOMM(channel: UInt8, label: String, timeout: TimeInterval = 5) async throws -> OpenedChannel {
+        guard let device else { throw TakeoverError.notPaired(address) }
+        let session = ClassicXPCSession(label: label)
+        try await session.start()
+        do {
+            let opened = try await session.openRFCOMM(device, channel: channel, timeout: timeout)
+            rfcommChannels.append((session, channel))
+            return opened
+        } catch {
+            session.invalidate()
+            throw error
+        }
+    }
+
+    // MARK: - Hand back
+
+    /// Closes our channels and lets macOS connect the headphones as usual.
+    public func handBack() async {
+        guard let device else { return invalidateAll() }
+        signaling?.close()
+        signalSession?.closeChannel(device, psm: AVDTP.psm)
+        signaling = nil
+        for extra in extraChannels { extra.session.closeChannel(device, psm: extra.psm) }
+        for rfcomm in rfcommChannels { rfcomm.session.closeRFCOMM(device, channel: rfcomm.channel) }
+        let control = sessions.first
+        control?.cancelConnection(device, force: true)
+        // Wait for the link to drop, then ask macOS to reconnect normally (no grabbing).
+        for _ in 0..<50 {
+            guard let up = try? await control?.lookup(address: address).isLinkUp, up else { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        try? await Task.sleep(for: .seconds(1))
+        log("asking macOS to reconnect the headphones")
+        control?.connect(device)
+        try? await Task.sleep(for: .seconds(3))
+        invalidateAll()
+    }
+
+    private func invalidateAll() {
+        for session in sessions { session.invalidate() }
+        for extra in extraChannels { extra.session.invalidate() }
+        for rfcomm in rfcommChannels { rfcomm.session.invalidate() }
+        sessions.removeAll()
+        extraChannels.removeAll()
+        rfcommChannels.removeAll()
+    }
+}
+
+/// Bookkeeping for the request race, shared with the request tasks.
+private final class RaceResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var busy: Set<Int> = []
+    private var finished: Set<Int> = []
+    private var winner: (session: Int, channel: OpenedChannel)?
+    private var discardLateWinners = false
+    private(set) var lastRefusal: Int?
+
+    func closeRound() { lock.withLock { discardLateWinners = true } }
+
+    func begin(_ i: Int) { lock.withLock { _ = busy.insert(i); finished.remove(i) } }
+    func isBusy(_ i: Int) -> Bool { lock.withLock { busy.contains(i) } }
+    func isFinished(_ i: Int) -> Bool { lock.withLock { finished.contains(i) } }
+
+    /// Returns false if the channel is not wanted (another request already won).
+    func finish(_ i: Int, channel: OpenedChannel) -> Bool {
+        lock.withLock {
+            busy.remove(i)
+            finished.insert(i)
+            if winner != nil || discardLateWinners { return false }
+            winner = (i, channel)
+            return true
+        }
+    }
+
+    func refused(_ i: Int, _ code: Int?) {
+        lock.withLock {
+            busy.remove(i)
+            finished.insert(i)
+            if let code { lastRefusal = code }
+        }
+    }
+
+    /// The winning channel, once. Later successes are given back.
+    func takeWinner() -> (session: Int, channel: OpenedChannel)? {
+        lock.withLock {
+            guard let won = winner else { return nil }
+            winner = nil
+            discardLateWinners = true
+            return won
+        }
+    }
+}
