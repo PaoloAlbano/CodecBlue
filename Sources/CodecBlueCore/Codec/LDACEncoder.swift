@@ -12,6 +12,43 @@ public final class LDACEncoder {
         public var name: String { ["HQ", "SQ", "MQ"][Int(rawValue)] }
     }
 
+    /// Every EQMID this build of libldac accepts, including the two the header does not document.
+    ///
+    /// The header names three (HQ/SQ/MQ). The ABR table in Sony's source names five, and the two
+    /// extra ones are real levels with real bitrates — 492 and 396 kbps at 96 kHz — which is what
+    /// makes a bitrate choice finer than three steps possible without ABR.
+    ///
+    /// Whether a given build honours them is a separate question, so `LDACEncoder.levels()`
+    /// asks rather than assumes; this enum is only the list of values to ask about.
+    public enum Level: Int32, Sendable, CaseIterable {
+        case hq = 0        // EQMID 0
+        case sq = 1        // EQMID 1
+        case mq = 2        // EQMID 2
+        case middle = 3    // EQMID 3 — undocumented in the header, 492 kbps at 96 kHz
+        case low = 4       // EQMID 4 — undocumented in the header, 396 kbps at 96 kHz
+
+        public var name: String {
+            switch self {
+            case .hq: return "HQ"
+            case .sq: return "SQ"
+            case .middle: return "SQ-"
+            case .mq: return "MQ"
+            case .low: return "MQ-"
+            }
+        }
+
+        /// The documented three, for the menu. The extra two are reachable but not advertised
+        /// until they are measured on real headphones.
+        public static var documented: [Level] { [.hq, .sq, .mq] }
+    }
+
+    /// Initialises with a raw EQMID, for the levels `Quality` does not name.
+    public convenience init(sampleRate: Int, level: Level, mtu: Int,
+                            channelMode: UInt8 = 0x01) throws {
+        try self.init(sampleRate: sampleRate, eqmid: level.rawValue, mtu: mtu,
+                      channelMode: channelMode)
+    }
+
     public struct Output {
         public let payload: Data  // LDAC frames
         public let frameCount: Int
@@ -36,18 +73,27 @@ public final class LDACEncoder {
     /// `LDACBT_MTU_REQUIRED`, the 2-DH5 payload size. A smaller `--media-mtu` is clamped.
     public static let minimumMTU = 679
 
-    public init(sampleRate: Int, quality: Quality, mtu: Int, channelMode: UInt8 = 0x01) throws {
+    public convenience init(sampleRate: Int, quality: Quality, mtu: Int,
+                            channelMode: UInt8 = 0x01) throws {
+        try self.init(sampleRate: sampleRate, eqmid: quality.rawValue, mtu: mtu,
+                      channelMode: channelMode)
+    }
+
+    public init(sampleRate: Int, eqmid: Int32, mtu: Int, channelMode: UInt8 = 0x01) throws {
         guard let handle = ldacBT_get_handle() else { throw EncoderError.unavailable }
         self.handle = handle
         self.sampleRate = sampleRate
         framesPerLDACFrame = sampleRate > 48000 ? 256 : 128
         let status = ldacBT_init_handle_encode(
-            handle, Int32(max(mtu, Self.minimumMTU)), quality.rawValue, Int32(channelMode),
+            handle, Int32(max(mtu, Self.minimumMTU)), eqmid, Int32(channelMode),
             LDACBT_SMPL_FMT_F32, Int32(sampleRate)
         )
         guard status == 0 else {
             let code = ldacBT_get_error_code(handle)
-            ldacBT_free_handle(handle)
+            // Do NOT free here. `handle` is already assigned to a stored property, so a throwing
+            // designated initialiser still runs `deinit`, which closes and frees it. Freeing in
+            // both places is a double free — measured 2026-11-07: it segfaulted the process the
+            // first time an unsupported EQMID was tried.
             throw EncoderError.initFailed(code)
         }
     }
@@ -55,6 +101,26 @@ public final class LDACEncoder {
     deinit {
         ldacBT_close_handle(handle)
         ldacBT_free_handle(handle)
+    }
+
+    /// Whether this build of libldac accepts ABR (EQMID 0x7F).
+    ///
+    /// LDAC has three fixed rates per sample rate — 330 / 660 / 990 kbps at 48 kHz — and no
+    /// continuous bitrate. Anything in between has to come from ABR, where the encoder picks the
+    /// level itself from what the link is doing. The header reserves 0x7F for it; whether the
+    /// library honours it is a separate question, so it is asked rather than assumed.
+    public static var supportsABR: Bool {
+        guard let handle = ldacBT_get_handle() else { return false }
+        // close before free: `ldacBT_free_handle` on a handle that was never closed segfaults.
+        // Measured 2026-11-07 — the first version of this function crashed the process, which is
+        // how the rule got written down.
+        defer {
+            ldacBT_close_handle(handle)
+            ldacBT_free_handle(handle)
+        }
+        let status = ldacBT_init_handle_encode(handle, 679, 0x7F, LDAC_CCI_STEREO,
+                                               LDACBT_SMPL_FMT_F32, 48000)
+        return status == 0
     }
 
     /// Current bitrate in kbps (libldac moves between quality levels gradually).

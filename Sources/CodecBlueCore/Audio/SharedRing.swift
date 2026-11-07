@@ -55,6 +55,19 @@ public final class SharedRing: @unchecked Sendable {
     deinit { munmap(base, Self.regionBytes) }
 
     public var sampleRate: Int { Int(sampleRateField.pointee) }
+
+    /// Sets the rate the driver will run at, for the next time coreaudiod loads it.
+    ///
+    /// The driver reads this field when it opens the ring, so a running device is unaffected: a
+    /// device that changed rate underneath its clients would break every app that had already
+    /// opened it. The caller is told to reload the driver, which is one `killall coreaudiod`.
+    ///
+    /// The buffer is sized for 96 kHz, so any rate at or below that fits; a higher one would run
+    /// the ring dry. The bound is checked here because the C side cannot report an error.
+    public func setSampleRate(_ rate: Int) {
+        guard (44100...96000).contains(rate) else { return }
+        sampleRateField.pointee = UInt32(rate)
+    }
     public var channelCount: Int { Int(channelsField.pointee) }
 
     /// Frames written by the driver but not yet taken by us. This is the queue depth the stream
@@ -142,6 +155,24 @@ public final class SharedRing: @unchecked Sendable {
     /// of audio from before — which would be played as a second of very old sound. Measured
     /// 2026-11-06: the depth sat at 48 000 frames (the whole ring) for the entire session because
     /// the reader started at the beginning and could never catch up.
+    /// Throws away up to `count` frames from the front, without reading them.
+    ///
+    /// This is how the reader stays in step with the encoder when the encoder had to skip source
+    /// audio because the link could not carry it. Skipping advances the clock without reading, so
+    /// without this the ring grows by exactly what was skipped and the stream falls behind by that
+    /// much — measured 2026-11-07, the ring went from 37 ms to a full second in one window and
+    /// stayed there.
+    ///
+    /// It is not `jumpToLive`: that discards everything, which is a hole in the sound. This
+    /// discards exactly as much as was already lost.
+    public func discard(_ count: Int) {
+        guard count > 0 else { return }
+        let written = writeIndex.pointee
+        let taken = readIndex.pointee
+        let waiting = written > taken ? Int(written - taken) : 0
+        readIndex.pointee = taken + UInt64(min(count, waiting))
+    }
+
     public func jumpToLive() {
         readIndex.pointee = writeIndex.pointee
     }

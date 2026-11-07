@@ -123,6 +123,53 @@ public final class A2DPStreamer: @unchecked Sendable {
     public var cushionChanged: ((TimeInterval) -> Void)?
     /// When set, the quality level follows the link instead of staying where it started.
     public var adaptBitrate = false
+
+    /// A quality level asked for from outside the stream, applied at the next window.
+    ///
+    /// The encoder is created inside `playLoop` and lives on that thread, so it cannot be touched
+    /// from another one. This is the hand-over: the control channel sets it, the loop picks it up
+    /// and clears it. Changing the level does not renegotiate AVDTP — libldac changes the frame
+    /// size it produces, and the packets carry their own frame count, so the stream continues.
+    ///
+    /// It also turns the automatic adapter off: a level chosen by hand that the adapter then
+    /// overrides is worse than no choice at all.
+    public var requestedQuality: LDACEncoder.Quality?
+
+    /// A cushion asked for from outside the stream, in seconds, applied at the next window.
+    ///
+    /// The cushion *is* the latency: it is the audio held between the driver and the socket, and
+    /// every millisecond of it is a millisecond the listener hears late. It was fixed at start-up
+    /// because it used to be a compile-time constant; now that it is measurable it should be
+    /// adjustable while listening, which is the only way to answer "is 40 ms enough here?".
+    ///
+    /// It is a floor, not a cap: the queue still widens itself when the link stalls, because a
+    /// cushion that cannot grow is a cushion that clicks.
+    public var requestedCushion: TimeInterval?
+
+    /// What the stream is doing right now, for the control channel to report.
+    public var status: (@Sendable () -> [String: String])?
+
+    /// Called with a frame count when the loop throws away source audio because the link cannot
+    /// keep up. The reader uses it to discard the same amount from the ring, so the two stay in
+    /// step. See the call site for what happens without it.
+    public var onSkip: (@Sendable (Int) -> Void)?
+
+    /// The level the encoder is producing right now, for the control channel.
+    ///
+    /// The encoder itself lives on the audio thread and must not be read from another one. This
+    /// is a plain copy, published once per report window, which is often enough for a status
+    /// line and never races the codec.
+    public private(set) var currentQuality: LDACEncoder.Quality?
+
+    /// The cushion the queue is allowed right now, in seconds. Published once per window, like
+    /// `currentQuality`, because the queue itself lives on the audio thread.
+    ///
+    /// This is the number that *is* the latency: everything held between the driver and the socket
+    /// is heard late by exactly this much.
+    public private(set) var currentCushion: TimeInterval = 0
+
+    /// The headphones' battery, as last reported, or nil if they have not said.
+    public private(set) var batteryPercent: Int?
     /// Applied to every frame just before encoding. The system volume lives here rather than in
     /// the driver because the driver is at the start of the chain: a change there has to travel
     /// through the ring and the queue before it is heard.
@@ -216,7 +263,10 @@ public final class A2DPStreamer: @unchecked Sendable {
                 let opened = try await takeover.openRFCOMM(channel: channel, label: "hfp", timeout: 5)
                 let holder = HandsFreeHolder(socket: ChannelSocket(channel: opened, label: "hfp"))
                 holder.onLog = log
-                holder.onBattery = { [log] level in log("headphone battery: \(level)%") }
+                holder.onBattery = { [log, weak self] level in
+                    log("headphone battery: \(level)%")
+                    self?.batteryPercent = level
+                }
                 handsFree = holder
                 log("hands-free channel \(channel) held")
             } catch {
@@ -562,6 +612,12 @@ public final class A2DPStreamer: @unchecked Sendable {
                 let skip = min(due - position - block, total - position)
                 position += skip
                 stats.record(droppedFrames: skip)
+                // The source has to be told, or the ring keeps filling while we throw audio away:
+                // skipping advances the *clock* without reading, so the driver's writes pile up
+                // behind us. Measured 2026-11-07: asking for a level the link cannot carry (SQ on
+                // a 500 kbps link) took the ring from 37 ms to a full 1000 ms in one window and it
+                // never came back, because nothing was reading it.
+                onSkip?(skip)
             }
             while queue.hasRoom, position < due {
                 let count = min(block, total - position)
@@ -711,6 +767,38 @@ public final class A2DPStreamer: @unchecked Sendable {
                         log(String(format: "cushion: back to %.0f ms after %d clean windows",
                                    queue.maxDuration * 1000, 5))
                         cushionChanged?(queue.maxDuration)
+                    }
+                }
+                if let requested = requestedCushion {
+                    requestedCushion = nil
+                    queue.retune(floor: requested, ceiling: max(queueCeiling, requested))
+                    // The ring's stale-audio budget is derived from the cushion, so it has to
+                    // follow through the same callback the adaptation uses — otherwise the two
+                    // numbers describing one thing would disagree, which is how the earlier
+                    // cushion bugs happened.
+                    cushionChanged?(queue.maxDuration)
+                    log(String(format: "cushion: %.0f ms by request", requested * 1000))
+                }
+                // A level chosen from outside wins, and turns the adapter off: see
+                // `requestedQuality`.
+                currentQuality = encoder.quality
+                currentCushion = queue.maxDuration
+                if let requested = requestedQuality {
+                    requestedQuality = nil
+                    if encoder.quality != requested {
+                        encoder.quality = requested
+                        // Drop what is queued. Those packets were encoded at the old level, and
+                        // the queue is the one thing that cannot be resized: a level change makes
+                        // the encoder produce a different frame size, and the packets already
+                        // waiting are both stale and the wrong shape. Measured 2026-11-07:
+                        // changing MQ → SQ with the queue at 240 ms produced 48–60% dropped and
+                        // the ring ran to a full second, because the full queue made the loop
+                        // discard audio to catch up.
+                        //
+                        // Clearing it costs at most the cushion (60 ms) and is over at once;
+                        // keeping it costs seconds of distortion.
+                        queue.removeAll()
+                        log("quality: set to LDAC \(requested.name) by request (queue cleared)")
                     }
                 }
                 if adaptBitrate {

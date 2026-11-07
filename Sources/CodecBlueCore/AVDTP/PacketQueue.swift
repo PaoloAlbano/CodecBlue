@@ -17,10 +17,14 @@ struct PacketQueue {
 
     private(set) var entries: [Entry] = []
     /// Longest audio the queue may hold when the link is behaving.
-    let floorDuration: TimeInterval
+    ///
+    /// `var`, not `let`: the cushion is the latency, and the latency has to be adjustable while
+    /// the stream runs — deciding that 60 ms is too much should not require stopping the audio.
+    /// `retune` is the only way to change it, so the derived `maxFrames` can never disagree.
+    private(set) var floorDuration: TimeInterval
     /// Longest audio the queue may hold at all: reached only after a stall proves the link needs
     /// the room.
-    let ceilingDuration: TimeInterval
+    private(set) var ceilingDuration: TimeInterval
     /// What the queue is allowed right now, between the two.
     private(set) var maxDuration: TimeInterval
     /// Frames per channel the queue may hold right now.
@@ -49,6 +53,20 @@ struct PacketQueue {
 
     init(sampleRate: Int, maxDuration: TimeInterval) {
         self.init(sampleRate: sampleRate, floorDuration: maxDuration, ceilingDuration: maxDuration)
+    }
+
+    /// Changes the cushion while the queue is in use.
+    ///
+    /// The current budget is clamped into the new range rather than reset: a queue that is
+    /// already holding 120 ms because the link needed it must not be told to hold 40 and then
+    /// drop what it has, which would be a skip at the exact moment the listener asked for less
+    /// delay. It narrows through `relax()` like any other surplus.
+    mutating func retune(floor: TimeInterval, ceiling: TimeInterval) {
+        floorDuration = floor
+        ceilingDuration = max(ceiling, floor)
+        let clamped = min(max(maxDuration, floorDuration), ceilingDuration)
+        maxDuration = clamped
+        maxFrames = max(1, Int(clamped * Double(sampleRate)))
     }
 
     /// Records that the link refused to take packets, and widens the budget if it can.

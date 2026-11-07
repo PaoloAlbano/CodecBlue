@@ -44,6 +44,12 @@ func usage() -> Never {
                             [--no-hfp] [--no-avrcp] [--low-latency] [--keep-link-quality] [--adapt] [--gain X]
            codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|MQ] [--queue-ms N]
                             (plays the CodecBlue virtual device)
+           codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
+           codecblue devices                      (the headphones macOS knows about)
+           codecblue status                       (ask a running stream what it is doing)
+           codecblue quality HQ|SQ|MQ             (change it while it plays)
+           codecblue adapt   on|off               (let it choose the level itself)
+           codecblue cushion 40                   (the cushion, in ms — this is the latency)
            codecblue link    XX:XX:XX:XX:XX:XX
            codecblue tone    FILE.wav [SECONDS] [--sweep]  (a constant sine, or a sweep)
            codecblue flood   XX:XX:XX:XX:XX:XX [SECONDS] [BYTES] [--keep-link-quality]
@@ -467,6 +473,75 @@ func playSystem(_ address: String, options: [String]) async throws {
         say("media keys: codecblue-keys not found next to this binary, so the headphones' "
             + "play/pause/next will be refused instead of accepted")
     }
+    // A way to steer the stream while it runs. Without it the only way to change the quality is
+    // to stop, edit the command line and start again — several seconds of silence, which defeats
+    // the purpose of a setting you want to try while listening.
+    let control = ControlServer { command in
+        switch command.name {
+        case "status":
+            var lines = streamer.status?().map { "\($0.key)=\($0.value)" }.sorted() ?? []
+            lines.append("end")
+            return lines
+        case "quality":
+            guard let wanted = command.argument?.uppercased(),
+                  let level = LDACEncoder.Quality.allCases.first(where: { $0.name == wanted })
+            else { return ["error=quality must be HQ, SQ or MQ"] }
+            streamer.requestedQuality = level
+            streamer.adaptBitrate = false
+            return ["ok quality=\(level.name)", "adapt=off"]
+        case "cushion":
+            // The cushion is the latency. Changing it while the audio plays is the only way to
+            // answer "is 40 ms enough on this link?", which is a question only the listener can
+            // answer.
+            guard let text = command.argument, let milliseconds = Double(text),
+                  (10...500).contains(milliseconds)
+            else { return ["error=cushion must be 10…500 (milliseconds)"] }
+            streamer.requestedCushion = milliseconds / 1000
+            return ["ok cushion=\(Int(milliseconds))ms"]
+        case "adapt":
+            switch command.argument?.lowercased() {
+            case "on":
+                streamer.adaptBitrate = true
+                return ["ok adapt=on"]
+            case "off":
+                streamer.adaptBitrate = false
+                return ["ok adapt=off"]
+            default:
+                return ["error=adapt must be on or off"]
+            }
+        case "quit":
+            streamer.stop()
+            return ["ok quitting"]
+        default:
+            return ["error=unknown command \(command.name)"]
+        }
+    }
+    // What `codecblue status` reports. Read from the same places the log reads, so the two can
+    // never disagree about what the stream is doing.
+    streamer.status = { [ring, volume] in
+        var out: [String: String] = [:]
+        out["ring_frames"] = String(ring.available)
+        out["ring_ms"] = String(format: "%.0f", Double(ring.available) / Double(ring.sampleRate) * 1000)
+        out["quality"] = streamer.currentQuality?.name ?? "unknown"
+        out["adapt"] = streamer.adaptBitrate ? "on" : "off"
+        out["battery"] = streamer.batteryPercent.map(String.init) ?? "unknown"
+        out["volume"] = volume.map { String(format: "%.0f", $0.reported * 100) } ?? "unknown"
+        out["skips"] = String(ring.skips)
+        // The latency the listener actually gets: the cushion (audio held between driver and
+        // socket) plus the queue in flight. Reporting only the cushion would understate it by the
+        // packets already committed, which is where the extra milliseconds hide.
+        out["cushion_ms"] = String(format: "%.0f", streamer.currentCushion * 1000)
+        out["latency_ms"] = String(format: "%.0f",
+                                   (streamer.currentCushion + Double(ring.available) / Double(ring.sampleRate)) * 1000)
+        return out
+    }
+    if control.start() {
+        say("control channel: \(ControlServer.defaultPath) (try `codecblue status`)")
+    } else {
+        say("control channel: could not create \(ControlServer.defaultPath); "
+            + "the stream works but cannot be steered")
+    }
+    defer { control.stop() }
     streamer.onKey = { [volume, say, mediaKeys] key in
         switch key {
         case "volume_up", "volume_down":
@@ -601,6 +676,10 @@ func playSystem(_ address: String, options: [String]) async throws {
     streamer.gain = { volume?.gain ?? 1 }
     box.streamer = streamer
     // nil = take whatever the headphones offer; the device's own rate is only a preference.
+    // Ask for the device's own rate. It is what the audio already is, so asking for it means no
+    // resampling at all; asking for 48 when the device runs at 44.1 would convert every sample
+    // for no reason. `setUp` treats it as a preference, so a device that cannot take this rate
+    // still gets the best it offers.
     let configuration = try await streamer.setUp(sampleRate: ring.sampleRate, quality: quality)
     // Now the AVRCP channel exists, so the headphones can be told the volume the Mac is at.
     // Without this the two volumes are independent: the slider moves our gain and the headphones
@@ -611,6 +690,17 @@ func playSystem(_ address: String, options: [String]) async throws {
     }
     // The device runs at 48 kHz and the headphones may take 44.1: convert rather than refuse.
     let resampler = Resampler(from: ring.sampleRate, to: configuration.sampleRate)
+    // Skipped source audio is audio nobody will hear: discard it from the ring too, or the ring
+    // grows by exactly what was skipped and the stream falls behind by that much.
+    // The conversion factor is captured as a number, not as the resampler: the resampler belongs
+    // to the audio thread and is not Sendable.
+    let skipScale = resampler.isIdentity
+        ? 1.0
+        : Double(ring.sampleRate) / Double(configuration.sampleRate)
+    streamer.onSkip = { frames in
+        ring.discard(Int((Double(frames) * skipScale).rounded()))
+    }
+
     if !resampler.isIdentity {
         log("resampling \(ring.sampleRate) Hz -> \(configuration.sampleRate) Hz for the encoder")
     }
@@ -790,6 +880,85 @@ do {
         let suffix = arguments.count > 5 ? arguments[5] : "tacl"
         try await flood(arguments[1], seconds: seconds, packetSize: size, keepLinkQuality: keep,
                         uidSuffix: suffix)
+    case ("rate", 2):
+        // Choose the rate the virtual device runs at. It is stored in the ring's header, and the
+        // driver reads it when coreaudiod loads it — so this writes the choice and says what to
+        // do next, rather than pretending a running device can change rate underneath its
+        // clients.
+        let wanted = Int(arguments[1]) ?? 0
+        guard [44100, 48000, 88200, 96000].contains(wanted) else {
+            log("usage: codecblue rate 44100|48000|88200|96000")
+            exit(2)
+        }
+        guard let ring = try? SharedRing() else {
+            log("could not open the ring at /tmp/codecblue-ring — is the driver installed?")
+            exit(1)
+        }
+        ring.setSampleRate(wanted)
+        log("the device will run at \(wanted) Hz after coreaudiod reloads the driver")
+        log("to apply it:  sudo killall coreaudiod")
+        log("note: the stream must also ask for \(wanted) Hz, or it will resample.")
+    case ("abr", 1):
+        // Does this libldac build support ABR? The header reserves EQMID 0x7F for it, and the
+        // answer decides whether a bitrate slider is even possible: LDAC has three fixed levels
+        // (330 / 660 / 990 kbps at 48 kHz) and no continuous rate, so anything between them must
+        // come from ABR.
+        print("ABR available: \(LDACEncoder.supportsABR ? "yes" : "no")")
+        // Every EQMID libldac accepts, and what it actually produces. The header documents three
+        // levels; the ABR table in the source names five (990 / 660 / 492 / 396 / 330 at 96 kHz),
+        // so the question is what this build does at 48 kHz.
+        for level in LDACEncoder.Level.allCases {
+            for rate in [44100, 48000] {
+                if let e = try? LDACEncoder(sampleRate: rate, level: level, mtu: 679) {
+                    print("  \(level.name) at \(rate) Hz: \(e.bitrateKbps) kbps")
+                } else {
+                    print("  \(level.name) at \(rate) Hz: refused")
+                }
+            }
+        }
+    case ("devices", 1):
+        // What the menu bar app lists. Also useful on its own: it is the only place that shows
+        // which of the paired headphones are actually on.
+        let devices = BluetoothHeadphone.audioDevices()
+        if devices.isEmpty {
+            print("no headphones known to macOS (pair them in System Settings first)")
+            exit(0)
+        }
+        for device in devices {
+            print("\(device.isConnected ? "connected" : "off      ")  \(device.name)  \(device.address)")
+        }
+    case ("status", 1):
+        // Talk to a running stream. No stream is not an error: it is the normal state.
+        guard let lines = ControlClient.send("status") else {
+            print("no stream is running (nothing at \(ControlServer.defaultPath))")
+            exit(0)
+        }
+        for line in lines where line != "end" {
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                print("\(parts[0].padding(toLength: 14, withPad: " ", startingAt: 0)) \(parts[1])")
+            } else {
+                print(line)
+            }
+        }
+    case ("quality", 2):
+        guard let lines = ControlClient.send("quality \(arguments[1])") else {
+            print("no stream is running (nothing at \(ControlServer.defaultPath))")
+            exit(1)
+        }
+        print(lines.joined(separator: "\n"))
+    case ("cushion", 2):
+        guard let lines = ControlClient.send("cushion \(arguments[1])") else {
+            print("no stream is running (nothing at \(ControlServer.defaultPath))")
+            exit(1)
+        }
+        print(lines.joined(separator: "\n"))
+    case ("adapt", 2):
+        guard let lines = ControlClient.send("adapt \(arguments[1])") else {
+            print("no stream is running (nothing at \(ControlServer.defaultPath))")
+            exit(1)
+        }
+        print(lines.joined(separator: "\n"))
     case ("handlers", 2):
         try await handlers(arguments[1])
     case ("agent", 2...):

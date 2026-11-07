@@ -1,3 +1,5 @@
+<img src="Resources/icon.png" width="96" align="right" alt="CodecBlue icon">
+
 # CodecBlue
 
 **Hi-res Bluetooth audio for the Mac.** CodecBlue streams your Mac's audio to Bluetooth
@@ -60,36 +62,54 @@ swift run codecblue-selftest      # unit tests
 .build/debug/codecblue probe  AA:BB:CC:DD:EE:FF   # list the codecs they support (takes them for a few seconds)
 ```
 
-## Using it
+## Installing
 
-The virtual output device needs to be installed once, with `sudo` (it lives in
-`/Library/Audio/Plug-Ins/HAL`, which the audio system owns):
+One command installs everything:
 
 ```sh
-sudo ./scripts/build-driver.sh --install
-sudo killall coreaudiod          # makes macOS pick the new plug-in up
+./scripts/install.sh
 ```
 
-Then, with the headphones connected:
+It builds, then puts three pieces where they belong, and asks for `sudo` once:
+
+| Where | What | Why there |
+|---|---|---|
+| `/Library/Audio/Plug-Ins/HAL/CodecBlueDriver.driver` | the virtual output device | the audio system owns that folder, and loads it on every boot |
+| `~/Applications/CodecBlue/` | `codecblue`, `codecblue-keys`, `CodecBlue.app` | no `sudo`, and it survives `swift package clean` |
+| `~/Library/LaunchAgents/com.codecblue.system.plist` | the agent that keeps audio flowing | written by the app when you pick a pair of headphones |
+
+Installing only the driver is the mistake this script exists to prevent: the device appears,
+every app plays into it, and nothing feeds it, so the result is silence with no error anywhere.
+
+`./scripts/install.sh --uninstall` removes all three.
+
+## Using it
+
+Open **CodecBlue** from `~/Applications/CodecBlue/` (or run `open ~/Applications/CodecBlue/CodecBlue.app`).
+It lives in the menu bar: pick your headphones, press **Start streaming**, and every app now
+plays through them in LDAC. Closing the window does not stop the music — the agent owns the
+stream, and brings it back when the headphones do.
+
+From the menu you can also change the LDAC level while it plays (`HQ`, `SQ`, `MQ`) and the
+device's sample rate.
+
+From a terminal, the same things:
+
+```sh
+codecblue devices                # the headphones macOS knows, and whether they are on
+codecblue status                 # what a running stream is doing
+codecblue quality HQ             # change the level without interrupting playback
+codecblue adapt on               # or let it choose the level itself
+codecblue rate 44100             # the device's rate; applies after `sudo killall coreaudiod`
+```
+
+Without the app, the stream can also be run by hand:
 
 ```sh
 ./codecblue system AA:BB:CC:DD:EE:FF --quality MQ
 ```
 
-and select **CodecBlue** as the output device. Every app now plays through it in LDAC. `Ctrl-C`
-stops cleanly and hands the headphones back to macOS.
-
-To have it start at login instead of from a terminal:
-
-```sh
-./codecblue agent install AA:BB:CC:DD:EE:FF --quality MQ
-launchctl load ~/Library/LaunchAgents/com.codecblue.system.plist
-./codecblue agent status         # is the device actually being fed?
-```
-
-`agent status` answers the question that matters — whether something is writing into the
-device — not merely whether a process exists. A device that is selected but not fed plays
-silence, and says so in the log rather than leaving you to guess.
+`Ctrl-C` stops cleanly and hands the headphones back to macOS.
 
 | Command | What it does |
 |---|---|
@@ -97,6 +117,13 @@ silence, and says so in the log rather than leaving you to guess.
 | `codecblue play ADDR FILE` | Stream a file, for testing without the driver |
 | `codecblue flood ADDR SECS BYTES` | Measure the link's throughput |
 | `codecblue tone FILE SECS [--sweep]` | Write a test signal: a constant sine, or a sweep |
+| `codecblue devices` | The headphones macOS knows, and whether they are on |
+| `codecblue status` | What a running stream is doing |
+| `codecblue quality HQ\|SQ\|MQ` | Change the level while it plays |
+| `codecblue adapt on\|off` | Let it choose the level itself |
+| `codecblue cushion 40` | The cushion in ms — this is the latency |
+| `codecblue rate 44100\|48000` | The device's sample rate (after a coreaudiod restart) |
+| `codecblue abr` | What this libldac build accepts, measured rather than assumed |
 | `codecblue agent install\|remove\|status` | The LaunchAgent |
 | `codecblue handlers device\|general` | Which handler answers each known message |
 
@@ -115,9 +142,13 @@ worse. Testing a link with such a file tests the file. This cost a day.
 | `Package.swift` | Swift package (SwiftPM) |
 | `Sources/CodecBlueCore/` | Engine: bluetoothd channel broker, AVDTP/AVRCP, codecs, session state machine |
 | `Sources/codecblue/` | Command-line tool |
+| `Sources/codecblue-keys/` | Media key helper — the only binary that needs Accessibility permission |
+| `Sources/CodecBlueMenu/` | The menu bar app: a client of the control channel, no audio code |
 | `Sources/codecblue-selftest/` | Unit tests (run with `swift run codecblue-selftest`) |
 | `Driver/CodecBlueDriver/` | The virtual output device (a C AudioServerPlugIn) |
-| `scripts/build-driver.sh` | Builds it, and installs or removes it with `--install` / `--uninstall` |
+| `scripts/build-driver.sh` | Builds the driver, and installs or removes it with `--install` / `--uninstall` |
+| `scripts/build-menu-app.sh` | Assembles `CodecBlueMenu.app` (a bundle is needed for `LSUIElement`) |
+| `scripts/install.sh` | Installs all three pieces, or removes them with `--uninstall` |
 | `notes/findings/` | What was measured and what it proved, including the dead ends |
 | `third_party/libldac/` | AOSP libldac (git submodule, unmodified) |
 
@@ -125,7 +156,10 @@ Only LDAC is implemented. aptX, AAC and SBC are named in the introduction as the
 a claim: headphones that do not offer LDAC cannot be driven by this yet, and the error says so
 explicitly rather than looking like a configuration problem.
 
-The menu bar app is not written; see [AGENTS.md](AGENTS.md) for the planned structure.
+The menu bar app is a thin client: everything it shows comes from the list of headphones macOS
+knows and from the control channel of a running stream, and everything it does is write the
+LaunchAgent, load it, or send a line down that channel. There is no audio code in it and no
+second copy of the rules — a second copy is a second thing to keep correct.
 
 ## Acknowledgements
 

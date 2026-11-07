@@ -59,7 +59,16 @@
 #define kRingChannels       2
 #define kRingSamples        (kRingFrames * kRingChannels)
 
-#define kSampleRate         48000.0
+// The sample rate is a *preference*, not a constant. 44.1 kHz is the native rate of nearly all
+// music, so forcing 48 means resampling something that was already right. The rate is chosen by
+// whoever starts the stream and written into the ring's header, which the driver reads when it
+// opens the ring; a change takes effect when coreaudiod reloads the driver.
+//
+// The default stays 48 kHz: it is what the ring was sized for and what every existing setup
+// expects, and a driver that silently changes rate on first load would be a surprise.
+#define kSampleRateDefault  48000.0
+#define kSampleRateMin      44100.0
+#define kSampleRateMax      96000.0
 #define kRingPath           "/tmp/codecblue-ring"
 // The clock period the host schedules IO against. 512 frames = 10.7 ms at 48 kHz: fine enough
 // that clock drift is corrected a hundred times a second instead of once, which is what stops
@@ -104,8 +113,29 @@ static void ring_open(void) {
     close(fd);
     if (map == MAP_FAILED) { return; }
     gRing = (CodecBlueRing*)map;
-    atomic_store(&gRing->sampleRate, (uint32_t)kSampleRate);
+    // The ring may already carry a rate, put there by `codecblue rate 44100` before coreaudiod
+    // was restarted. Honour it, within what the ring can hold: the buffer is sized for the
+    // highest rate it will ever see, so any lower rate is safe and only wastes space.
+    uint32_t existing = atomic_load(&gRing->sampleRate);
+    if (existing < (uint32_t)kSampleRateMin || existing > (uint32_t)kSampleRateMax) {
+        existing = (uint32_t)kSampleRateDefault;
+    }
+    atomic_store(&gRing->sampleRate, existing);
     atomic_store(&gRing->channels, (uint32_t)kRingChannels);
+}
+
+/// The rate the driver is running at, as stored in the ring.
+///
+/// Everything that used to read `kSampleRate` reads this: the format the host is offered, the
+/// clock, and the zero-timestamp period. They must agree — a format at 44.1 with a clock at 48
+/// would play everything 8.8% fast.
+static double ring_sample_rate(void) {
+    if (gRing == NULL) { return kSampleRateDefault; }
+    uint32_t rate = atomic_load(&gRing->sampleRate);
+    if (rate < (uint32_t)kSampleRateMin || rate > (uint32_t)kSampleRateMax) {
+        return kSampleRateDefault;
+    }
+    return (double)rate;
 }
 
 #pragma mark - Driver state
@@ -182,7 +212,7 @@ static double host_ticks_per_frame(void) {
     mach_timebase_info_data_t timebase;
     mach_timebase_info(&timebase);
     double ticksPerSecond = 1e9 * (double)timebase.denom / (double)timebase.numer;
-    return ticksPerSecond / kSampleRate;
+    return ticksPerSecond / ring_sample_rate();
 }
 
 #pragma mark - Interface: COM
@@ -343,7 +373,7 @@ static OSStatus driver_IsPropertySettable(AudioServerPlugInDriverRef inDriver, A
 
 static void describe_format(AudioStreamBasicDescription* format) {
     memset(format, 0, sizeof(*format));
-    format->mSampleRate = kSampleRate;
+    format->mSampleRate = ring_sample_rate();
     format->mFormatID = kAudioFormatLinearPCM;
     format->mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
     format->mBytesPerPacket = sizeof(float) * kRingChannels;
@@ -593,7 +623,7 @@ static OSStatus driver_GetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
             *outDataSize = sizeof(UInt32);
             return kAudioHardwareNoError;
         case kAudioDevicePropertyNominalSampleRate:
-            *(Float64*)outData = kSampleRate;
+            *(Float64*)outData = ring_sample_rate();
             *outDataSize = sizeof(Float64);
             return kAudioHardwareNoError;
         case kAudioDevicePropertyAvailableNominalSampleRates: {
@@ -712,7 +742,10 @@ static void volume_notify_changed(void) {
         kAudioObjectPropertyElementMain
     };
     AudioObjectID controls[3] = { kVolumeControlID, kVolumeLeftID, kVolumeRightID };
-    gDriver.host->PropertiesChanged(gDriver.host, kDeviceObjectID, 3, controls);
+    // One notification per control, each addressed to that control. An earlier version passed the
+    // array with a count of 3 and the *device* as the object, which tells the host that three
+    // consecutive property addresses on the device changed — and they are not addresses at all,
+    // they are object IDs. The host read them as if they were, and the compiler said so.
     for (int i = 0; i < 3; i++) {
         gDriver.host->PropertiesChanged(gDriver.host, controls[i], 1, &control);
     }

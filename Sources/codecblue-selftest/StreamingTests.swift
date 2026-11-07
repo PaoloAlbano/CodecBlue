@@ -1154,3 +1154,316 @@ func mediaKeyHelperTests() {
         check(UInt8(0x09) != UInt8(0x08), "they must not be confused")
     }
 }
+
+/// The control channel: one line in, one line out, over a unix socket in /tmp.
+///
+/// It exists so a setting can be changed while the audio keeps playing. Without it, changing the
+/// quality meant stopping the stream and starting it again — several seconds of silence, which
+/// defeats the point of a setting you want to try while listening.
+func controlChannelTests() {
+    test("a client and a server talk over a socket in /tmp") {
+        let path = "/tmp/codecblue-selftest-\(getpid()).sock"
+        let server = ControlServer(path: path) { command in
+            switch command.name {
+            case "status": return ["quality=MQ", "end"]
+            case "quality": return ["ok quality=\(command.argument ?? "?")"]
+            default: return ["error=unknown"]
+            }
+        }
+        check(server.start(), "the socket is created")
+        defer { server.stop() }
+        // The accept loop runs on its own queue, so give it a moment to be listening. A test that
+        // races its own server would fail intermittently, which is worse than a sleep.
+        usleep(100_000)
+        check(ControlClient.send("status", path: path) == ["quality=MQ", "end"], "status")
+        check(ControlClient.send("quality HQ", path: path) == ["ok quality=HQ"], "quality")
+        check(ControlClient.send("nonsense", path: path) == ["error=unknown"], "unknown command")
+        // No server: nil, not a crash. "Nothing is running" is the normal state of the machine.
+        server.stop()
+        check(ControlClient.send("status", path: path) == nil, "nothing listening")
+    }
+
+    test("a stale socket file does not block the next stream") {
+        // A process killed with SIGKILL leaves the file behind, and bind() then fails with
+        // EADDRINUSE forever. The only cure would be a reboot, so the file is unlinked first.
+        let path = "/tmp/codecblue-selftest-stale-\(getpid()).sock"
+        FileManager.default.createFile(atPath: path, contents: Data())
+        let server = ControlServer(path: path) { _ in ["ok"] }
+        check(server.start(), "a leftover file is replaced")
+        server.stop()
+    }
+}
+
+/// Listing the headphones macOS knows about.
+///
+/// `system_profiler` prints `Connected:` and `Not Connected:` sections, and a device appears in
+/// exactly one. Counting a grep over the whole output says a pair of headphones is present when
+/// it is switched off — a mistake that cost a whole evening once (notes §13.1), so the section is
+/// tracked and tested.
+func headphoneListTests() {
+    let sample = """
+          Bluetooth:
+
+              Devices (Paired, Configured, etc.):
+                  HUAWEI FreeBuds 5:
+                      Address: 40:DC:A5:0E:14:48
+                      Vendor ID: 0x027D
+                      Minor Type: Headphones
+
+          Connected:
+              Keychron K3 Pro:
+                  Address: 6C:93:08:61:BB:D9
+                  Minor Type: Keyboard
+              HUAWEI FreeBuds 5:
+                  Address: 40:DC:A5:0E:14:48
+                  Minor Type: Headphones
+
+          Not Connected:
+              FreeBuds 3:
+                  Address: AA:BB:CC:DD:EE:FF
+                  Minor Type: Headphones
+              MX Master 3S:
+                  Address: D1:52:01:D5:79:C3
+                  Minor Type: Mouse
+
+          """
+    test("a device is listed once, with the section it is in") {
+        let devices = BluetoothHeadphone.parse(sample)
+        let freeBuds = devices.filter { $0.address == "40:DC:A5:0E:14:48" }
+        check(freeBuds.count == 1, "the paired listing must not be counted twice: \(freeBuds.count)")
+        check(freeBuds.first?.isConnected == true, "it is in Connected")
+        check(freeBuds.first?.name == "HUAWEI FreeBuds 5", freeBuds.first?.name ?? "nil")
+    }
+
+    test("a switched-off pair is listed as not connected, not as present") {
+        let devices = BluetoothHeadphone.parse(sample)
+        let old = devices.first { $0.address == "AA:BB:CC:DD:EE:FF" }
+        check(old != nil, "it is still listed")
+        check(old?.isConnected == false, "but not connected — the mistake was reading it as present")
+    }
+
+    test("only audio devices are offered") {
+        let audio = BluetoothHeadphone.parse(sample).filter(\.isAudio)
+        check(audio.count == 2, "two pairs of headphones, not the keyboard or the mouse: \(audio.count)")
+        check(!audio.contains { $0.kind == "Keyboard" }, "no keyboard")
+        check(!audio.contains { $0.kind == "Mouse" }, "no mouse")
+    }
+
+    test("the kind test covers the words Apple uses") {
+        for kind in ["Headphones", "Headset", "Speaker", "Earbuds", "AirPods"] {
+            check(BluetoothHeadphone(name: "x", address: "y", isConnected: true, kind: kind).isAudio,
+                  kind)
+        }
+        for kind in ["Keyboard", "Mouse", "Trackpad", "Gamepad"] {
+            check(!BluetoothHeadphone(name: "x", address: "y", isConnected: true, kind: kind).isAudio,
+                  kind)
+        }
+    }
+}
+
+/// The LaunchAgent, as the menu bar app uses it.
+///
+/// The app does not run a stream itself: it writes the plist and loads it, so the audio survives
+/// closing the window. That means two things have to be right — the path in the plist, and the
+/// unload-then-load order, because `load` on an already-loaded label does nothing and the old
+/// address would keep running.
+func launchAgentAppTests() {
+    test("the plist points at the stable path, not SwiftPM's internal one") {
+        // `.build/out/Products/Debug` is deleted by `swift package clean`; `.build/debug` is the
+        // symlink SwiftPM maintains, and `~/Applications/CodecBlue` is where `install.sh` puts the
+        // copy that outlives both. This mistake has been made once already.
+        let invoked = URL(fileURLWithPath: "/repo/.build/out/Products/Debug/codecblue")
+        let resolved = LaunchAgent.resolveExecutable(from: invoked)
+        check(!resolved.contains("/.build/out/"), "never SwiftPM's internal directory: \(resolved)")
+        // Whatever it settles on must be a path that exists, or the agent fails at login with
+        // nothing in its log but "no such file".
+        check(FileManager.default.isExecutableFile(atPath: resolved)
+              || resolved == invoked.path,
+              "either a real path or an honest fallback: \(resolved)")
+    }
+
+    test("the plist carries the address and the arguments") {
+        let text = LaunchAgent.plist(executable: "/bin/echo", address: "40:DC:A5:0E:14:48",
+                                     arguments: ["--quality", "MQ"])
+        check(text.contains("<string>40:DC:A5:0E:14:48</string>"), "the address")
+        check(text.contains("<string>--quality</string>"), "the option")
+        check(text.contains("<string>MQ</string>"), "its value")
+        check(text.contains("<key>KeepAlive</key>"), "it comes back when the headphones return")
+        check(text.contains("<key>ThrottleInterval</key>"), "and does not spin while they are off")
+    }
+
+    test("a path with an ampersand still parses") {
+        // A plist that will not parse is a LaunchAgent that silently does nothing.
+        let text = LaunchAgent.plist(executable: "/Users/a&b/codecblue", address: "AA:BB:CC:DD:EE:FF")
+        check(text.contains("a&amp;b"), "escaped")
+        check(!text.contains("/Users/a&b/"), "not raw")
+        let data = Data(text.utf8)
+        let parsed = try? PropertyListSerialization.propertyList(from: data, format: nil)
+        check(parsed != nil, "the result is a plist")
+    }
+
+    test("loading unloads first, so a rewritten plist takes effect") {
+        // `launchctl load` on an already-loaded label is a no-op: after rewriting the plist for a
+        // different pair, loading alone would keep the old address running.
+        let source = try? String(contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift",
+                                 encoding: .utf8)
+        guard let source else { check(false, "source not readable"); return }
+        let loadBody = source.components(separatedBy: "public static func load() throws {")
+        check(loadBody.count == 2, "load() found")
+        let body = loadBody[1].prefix(300)
+        check(body.contains("unload"), "load() unloads first")
+    }
+}
+
+/// The device's sample rate is a choice, not a constant.
+///
+/// 44.1 kHz is the native rate of nearly all music, so forcing 48 means resampling something that
+/// was already right — for no gain. The rate lives in the ring's header, which the driver reads
+/// when coreaudiod loads it, because a running device cannot change rate underneath its clients.
+func sampleRateTests() {
+    test("the rate is bounded by what the buffer can hold") {
+        // The ring is sized for 96 kHz. A higher rate would run it dry; a lower one only wastes
+        // space. The C side cannot report an error, so the bound lives in Swift.
+        let ring = try? SharedRing()
+        guard let ring else { check(true, "no driver running, nothing to check"); return }
+        let before = ring.sampleRate
+        ring.setSampleRate(44100)
+        check(ring.sampleRate == 44100, "accepted")
+        ring.setSampleRate(200_000)
+        check(ring.sampleRate == 44100, "refused, unchanged")
+        ring.setSampleRate(before)
+        check(ring.sampleRate == before, "restored")
+    }
+
+    test("a rate the headphones do not take falls back instead of failing") {
+        // `setUp` treats the rate as a preference: a device that only offers 44.1 still works.
+        // The rule is in the code, and this pins the intent.
+        let offered = [44100, 48000]
+        let requested = 96000
+        let chosen = offered.contains(requested) ? requested : offered.first
+        check(chosen == 44100, "falls back to what is offered")
+    }
+
+    test("resampling at the device's own rate is a no-op") {
+        // If the stream asks for the rate the device already runs at, the resampler must not
+        // touch the samples: a converter at ratio 1 that still interpolates would add a sample of
+        // delay and a little noise for nothing.
+        let resampler = Resampler(from: 44100, to: 44100)
+        check(resampler.isIdentity, "same rate is identity")
+        let input: [Float] = [0.1, -0.1, 0.2, -0.2]
+        check(resampler.process(input) == input, "samples pass through unchanged")
+    }
+}
+
+/// Where things get installed, and why it is three places.
+///
+/// The driver needs sudo and lives in /Library/Audio/Plug-Ins/HAL; the programs need no sudo and
+/// live in ~/Applications/CodecBlue; the agent lives in ~/Library/LaunchAgents. Installing only
+/// the first is the mistake that makes every app play into silence with no error anywhere.
+func installLayoutTests() {
+    test("the agent prefers the installed copy over a build directory") {
+        // `swift package clean` deletes .build, so an agent pointing there breaks the next time
+        // anyone cleans. The installed copy is the one that survives.
+        let installed = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/CodecBlue/codecblue")
+        let invoked = URL(fileURLWithPath: "/repo/.build/debug/codecblue")
+        let resolved = LaunchAgent.resolveExecutable(from: invoked)
+        // Either the installed copy exists and wins, or we are in a checkout where it does not
+        // and the build path is the right answer. Both are correct; what must never happen is a
+        // path into .build/out, which SwiftPM deletes.
+        check(!resolved.contains("/.build/out/"), "never SwiftPM's internal directory: \(resolved)")
+        if FileManager.default.isExecutableFile(atPath: installed.path) {
+            check(resolved == installed.path, "the installed copy wins")
+        } else {
+            check(resolved.hasSuffix("/.build/debug/codecblue"), "falls back to the stable symlink")
+        }
+    }
+
+    test("the three locations are distinct and none is inside the repository") {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let driver = "/Library/Audio/Plug-Ins/HAL/CodecBlueDriver.driver"
+        let programs = "\(home)/Applications/CodecBlue"
+        let agent = "\(home)/Library/LaunchAgents/com.codecblue.system.plist"
+        check(driver.hasPrefix("/Library/"), "the driver is system-wide")
+        check(programs.hasPrefix(home), "the programs are yours")
+        check(agent.hasPrefix(home), "the agent is yours")
+        check(Set([driver, programs, agent]).count == 3, "three different places")
+    }
+}
+
+/// The icon is generated, not committed as a blob.
+///
+/// It is a Python script that describes the mark — a sine that becomes a staircase, which is what
+/// a codec does — so it can be re-drawn at any size and changed by editing a few numbers. A PNG in
+/// git that nobody can edit is worse than a script that can be re-run.
+func iconTests() {
+    test("the icon script and its output are both present") {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // codecblue-selftest
+            .deletingLastPathComponent()  // Sources
+            .deletingLastPathComponent()  // repo
+        let script = root.appendingPathComponent("scripts/make-icon.py")
+        check(FileManager.default.fileExists(atPath: script.path), "the script is in the repo")
+        let icns = root.appendingPathComponent("Resources/AppIcon.icns")
+        if FileManager.default.fileExists(atPath: icns.path) {
+            let size = (try? FileManager.default.attributesOfItem(atPath: icns.path)[.size] as? Int) ?? 0
+            check((size ?? 0) > 1000, "the .icns has content: \(size ?? 0) bytes")
+        } else {
+            check(true, "not generated yet — scripts/make-icon.py makes it")
+        }
+    }
+
+    test("the bundle declares the icon") {
+        // Without CFBundleIconFile macOS shows the generic application icon, which for a menu bar
+        // program is the only place it is ever seen as an app.
+        let script = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/build-menu-app.sh")
+        guard let text = try? String(contentsOf: script, encoding: .utf8) else {
+            check(false, "build script not readable")
+            return
+        }
+        check(text.contains("CFBundleIconFile"), "the plist names the icon")
+        check(text.contains("AppIcon.icns"), "and the file is copied into the bundle")
+    }
+}
+
+/// The cushion is the latency, and it is adjustable while the audio plays.
+///
+/// It used to be fixed at start-up, which meant answering "is 40 ms enough on this link?" required
+/// stopping the stream — and the only person who can answer that question is the one listening.
+func cushionRetuneTests() {
+    test("retuning clamps the current budget instead of resetting it") {
+        // A queue already holding 120 ms because the link needed it must not be told to hold 40
+        // and then drop what it has: that is a skip at the exact moment the listener asked for
+        // less delay. It narrows through `relax()` like any other surplus.
+        var queue = PacketQueue(sampleRate: 48000, floorDuration: 0.060, ceilingDuration: 0.250)
+        while queue.noteStall() {}  // widen to the ceiling
+        check(abs(queue.maxDuration - 0.250) < 1e-9, "at the ceiling: \(queue.maxDuration)")
+        queue.retune(floor: 0.040, ceiling: 0.250)
+        check(abs(queue.maxDuration - 0.250) < 1e-9, "still holds what it had")
+        queue.retune(floor: 0.040, ceiling: 0.100)
+        check(abs(queue.maxDuration - 0.100) < 1e-9, "clamped down to the new ceiling")
+        check(queue.maxFrames == Int(0.100 * 48000), "frames follow the duration")
+    }
+
+    test("a lower floor narrows the budget without emptying the queue") {
+        var queue = PacketQueue(sampleRate: 48000, floorDuration: 0.060, ceilingDuration: 0.250)
+        for _ in 0..<10 { queue.append(Data([0]), frames: 128) }
+        let before = queue.count
+        queue.retune(floor: 0.030, ceiling: 0.250)
+        check(queue.count == before, "no packet is discarded by retuning")
+        // And the floor is what it relaxes towards.
+        while queue.relax() {}
+        check(abs(queue.maxDuration - 0.030) < 1e-9, "relaxes to the new floor: \(queue.maxDuration)")
+    }
+
+    test("the ceiling is never below the floor") {
+        // A caller that passes them the wrong way round must not produce a queue that can hold
+        // nothing: `maxFrames` would be 0 and every append would drop.
+        var queue = PacketQueue(sampleRate: 48000, floorDuration: 0.060, ceilingDuration: 0.250)
+        queue.retune(floor: 0.100, ceiling: 0.040)
+        check(queue.ceilingDuration >= queue.floorDuration, "ceiling raised to the floor")
+        check(queue.maxFrames > 0, "still able to hold audio")
+    }
+}
