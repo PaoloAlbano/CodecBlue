@@ -19,5 +19,13 @@ daemon/
 __pycache__/
 *.pyc
 
-# Private notes, plans and research (not published)
-notes/
+# Notes: the measurements are published, the rest is not.
+#
+# `notes/findings/` is the record of what was measured and what it proved, including the dead
+# ends — it is the most useful thing in this repository for anyone trying the same thing, and the
+# README links to it. The plan, the archive and the reverse-engineering notes stay private: they
+# are working papers, they name things that are not mine to publish, and they would be read as
+# documentation when they are not.
+notes/*
+!notes/findings/
+notes/findings/*.tmp
