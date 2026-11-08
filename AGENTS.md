@@ -47,6 +47,14 @@ same program with the same configuration, so they cannot disagree. `make lint` a
 compiler warning: not `-warnings-as-errors`, which would break a build the day Apple adds a
 deprecation, but a count that has to be zero.
 
+`.swift-format` must be readable by every swift-format from 5.9 to 6.4, because `xcrun` resolves
+to whatever the machine has: an Xcode 16 runner and a Command Line Tools laptop do not run the
+same version. Only keys that all of them know, and none whose type has changed between versions.
+The one that caught this is `reflowMultilineStringLiterals`, a string in 6.4 and an object in
+6.1 — a single wrong type rejects the *whole file*, one error per source file, and the check
+reports nothing at all rather than reporting wrongly. Before adding a key, check it exists in
+the oldest version that has to pass, and prefer leaving a default alone over restating it.
+
 A test must not depend on the machine it runs on. Everything that reads the system — the
 installed copy of the app, a real audio device, paired headphones, a loaded driver — either
 takes its answer as an argument or is skipped with a reason. The first CI run failed on a test

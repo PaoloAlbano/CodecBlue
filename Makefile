@@ -58,6 +58,15 @@ selftest: test
 # not SwiftFormat — this project is built with the Command Line Tools alone, and a tool that has
 # to be installed separately is a tool half the contributors will not have. `xcrun` finds it in
 # the active developer directory, which is where the compiler already comes from.
+#
+# `xcrun` and not a pinned version, but the *configuration* is written to be read by every version
+# from 5.9 to 6.4: only keys that all of them know, and none whose type changed. That is not
+# fussiness — the runner's `xcrun` resolves to a different swift-format than a laptop's, and the
+# configuration file is the only thing the two share. Measured 2026-11-08, first CI run of this
+# target: `reflowMultilineStringLiterals: "never"` is a string in 6.4 and an object in 6.1, so the
+# whole file was rejected with "The data couldn't be read because it isn't in the correct format"
+# — fourteen times, once per file, and no formatting check at all. A configuration that only the
+# author's toolchain can read is a check that only the author passes.
 SWIFT_FORMAT := xcrun swift-format
 # Found on disk and not asked of git, so a file that is new and not yet `git add`ed is checked
 # too. A formatter that skips the file you are working on is a formatter you stop running.
