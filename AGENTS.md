@@ -55,9 +55,11 @@ when they are not. Four secrets, all optional:
 | `CODECBLUE_NOTARY_KEY_ID` | its Key ID |
 | `CODECBLUE_NOTARY_ISSUER` | the issuer UUID (only for Team keys) |
 
-Without them the archive is ad-hoc signed: it runs, but macOS asks the user to confirm the first
-launch and the Accessibility permission is forgotten on every update, because it is tied to the
-signature. Locally, `CODECBLUE_NOTARY_PROFILE` (from `xcrun notarytool store-credentials`) does the
+Without them the archive is ad-hoc signed. It runs, and the Accessibility permission survives
+updates — `scripts/sign.sh` sets the designated requirement to the bundle identifier instead of the
+default `cdhash`, which is what would otherwise forget the grant at every build. What ad-hoc cannot
+do is earn Gatekeeper's trust: the user has to right-click and choose Open once, because there is no
+authority chain behind the signature. Only a Developer ID and notarisation remove that dialog. Locally, `CODECBLUE_NOTARY_PROFILE` (from `xcrun notarytool store-credentials`) does the
 same job as the three key variables.
 
 Signed is not trusted. Signing proves who built the archive; notarisation is Apple having scanned

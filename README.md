@@ -103,10 +103,16 @@ driver, and nothing else. `./uninstall.sh` undoes it.
 The archive has the binaries already built — the CLI, the media key helper, the menu bar app and
 the driver — so nothing has to be compiled and no toolchain is needed.
 
-It is signed, notarised and stapled when the release was built with a Developer ID, and the release
-notes say so. If they do not, the build is ad-hoc signed: it runs, but macOS asks for confirmation
-the first time and forgets the Accessibility permission on every update, because that permission is
-tied to the signature.
+**On first launch macOS will refuse it.** CodecBlue is not notarised — that needs an Apple Developer
+ID, which this project does not have. Right-click the app, choose **Open**, and confirm once; after
+that it launches normally. This is expected, not a corrupt download.
+
+The archive is ad-hoc signed with a *stable* designated requirement, so the Accessibility permission
+the headphones' buttons need is remembered across updates. Without that, every update would silently
+forget it.
+
+If the release notes say "signed and notarised by Apple", none of the above applies: that build was
+made with a Developer ID and opens like any other app.
 
 ```sh
 shasum -a 256 -c CodecBlue-<version>.zip.sha256
