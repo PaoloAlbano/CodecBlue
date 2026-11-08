@@ -87,8 +87,16 @@ DRIVER=$(ls -d .build/driver*/CodecBlueDriver.driver 2>/dev/null | head -1)
 [ -n "$DRIVER" ] || die "the driver was not built"
 
 say "building the menu bar app…"
-MENU_APP=$(sh scripts/build-menu-app.sh 2>/dev/null | sed -n 's/^built \(.*\)$/\1/p' | tail -1)
-[ -n "$MENU_APP" ] && [ -d "$MENU_APP" ] || die "the menu bar app was not built"
+# `CODECBLUE_SIGN_IDENTITY` is deliberately hidden from this build: the script signs the bundle
+# ad-hoc for local use, and the real signature is applied below, once, in the right order. Passing
+# the identity here made the script try to sign with a certificate this machine does not have, fail,
+# and exit before printing where the bundle went — which read as "the app was not built".
+MENU_OUT=$(env -u CODECBLUE_SIGN_IDENTITY sh scripts/build-menu-app.sh 2>&1) || true
+MENU_APP=$(printf '%s\n' "$MENU_OUT" | sed -n 's/^built \(.*\)$/\1/p' | tail -1)
+if [ -z "$MENU_APP" ] || [ ! -d "$MENU_APP" ]; then
+    printf '%s\n' "$MENU_OUT" >&2
+    die "the menu bar app was not built"
+fi
 
 # --- stage ------------------------------------------------------------------------------------
 say "staging…"
@@ -125,7 +133,7 @@ if [ "$(id -u)" = "0" ]; then
     exit 1
 fi
 
-echo "1/3 installing the programs into $APP_DIR…"
+echo "1/3 installing the programs into ${APP_DIR}…"
 mkdir -p "$APP_DIR"
 cp "$HERE/codecblue" "$APP_DIR/codecblue"
 cp "$HERE/codecblue-keys" "$APP_DIR/codecblue-keys"
@@ -176,17 +184,37 @@ echo "done. Your preferences are still in ~/Library/Preferences/com.codecblue.me
 UNINSTALL
 chmod +x "$STAGE/uninstall.sh"
 
-# --- sign and zip -----------------------------------------------------------------------------
+# --- sign -------------------------------------------------------------------------------------
 #
 # Signing is optional and its absence is announced, not hidden. An unsigned release works, but
-# macOS will ask the user to confirm the first launch and the Accessibility permission is tied to
-# the signature — so every update forgets it.
+# macOS asks the user to confirm the first launch, and the Accessibility permission is tied to the
+# signature — so every update forgets it and the user has to grant it again.
+#
+# The order matters and is not negotiable: sign inside-out (the helper inside the bundle before the
+# bundle), `--options runtime` because the hardened runtime is what notarisation requires, and
+# `--timestamp` because a signature without a trusted timestamp stops validating when the
+# certificate expires — which is a release that works today and breaks in two years for reasons
+# nobody will connect to the certificate.
 if [ -n "${CODECBLUE_SIGN_IDENTITY:-}" ]; then
-    say "signing with $CODECBLUE_SIGN_IDENTITY…"
+    say "signing with ${CODECBLUE_SIGN_IDENTITY}…"
+    sign() {
+        codesign --force --options runtime --timestamp --sign "$CODECBLUE_SIGN_IDENTITY" "$1" \
+            || die "signing $1 failed"
+    }
+    # Inside out: the helper is reached through the bundle, so it is signed first.
+    sign "$STAGE/CodecBlue.app/Contents/MacOS/codecblue-keys"
+    sign "$STAGE/CodecBlue.app"
+    sign "$STAGE/CodecBlueDriver.driver"
+    sign "$STAGE/codecblue"
+    sign "$STAGE/codecblue-keys"
+
+    # `verify --deep --strict` is the check Apple's own tooling runs. It is here because a broken
+    # signature is worse than no signature: the user gets "damaged and can't be opened", which
+    # reads as a corrupt download and is unfixable from their side.
+    say "verifying the signatures…"
     for item in "$STAGE/CodecBlue.app" "$STAGE/CodecBlueDriver.driver" \
                 "$STAGE/codecblue" "$STAGE/codecblue-keys"; do
-        codesign --force --options runtime --timestamp --sign "$CODECBLUE_SIGN_IDENTITY" "$item" \
-            || die "signing $item failed"
+        codesign --verify --deep --strict --verbose=1 "$item" 2>&1 | grep -v "^$" || true
     done
 else
     say "note: CODECBLUE_SIGN_IDENTITY is not set, so this archive is ad-hoc signed."
@@ -201,8 +229,67 @@ rm -f "$ZIP"
 # needs, and a `.app` zipped with `zip` arrives broken in ways that look like a corrupt download.
 ditto -c -k --sequesterRsrc --keepParent "$STAGE" "$ZIP"
 
-# The checksum, because a download that can be verified is a download that can be reported on.
+# --- notarise ---------------------------------------------------------------------------------
+#
+# Notarisation is Apple scanning the archive and issuing a ticket, and the ticket is what makes
+# Gatekeeper let it run on a Mac that has never seen it. Without it a signed archive still gets
+# "Apple cannot check it for malicious software" on first launch — signed is not the same as
+# trusted, which is the confusion this step exists to remove.
+#
+# Credentials come from the environment, never from this script: an App Store Connect key
+# (`CODECBLUE_NOTARY_KEY`, `CODECBLUE_NOTARY_KEY_ID`, `CODECBLUE_NOTARY_ISSUER`) or a keychain
+# profile (`CODECBLUE_NOTARY_PROFILE`, made once with `xcrun notarytool store-credentials`). No
+# credential is ever written to the archive, the log, or the repository.
+NOTARY_ARGS=""
+if [ -n "${CODECBLUE_NOTARY_PROFILE:-}" ]; then
+    NOTARY_ARGS="-p $CODECBLUE_NOTARY_PROFILE"
+elif [ -n "${CODECBLUE_NOTARY_KEY:-}" ] && [ -n "${CODECBLUE_NOTARY_KEY_ID:-}" ]; then
+    NOTARY_ARGS="-k $CODECBLUE_NOTARY_KEY -d $CODECBLUE_NOTARY_KEY_ID"
+    [ -n "${CODECBLUE_NOTARY_ISSUER:-}" ] && NOTARY_ARGS="$NOTARY_ARGS -i $CODECBLUE_NOTARY_ISSUER"
+fi
+
+if [ -z "$NOTARY_ARGS" ]; then
+    say ""
+    say "note: no notarisation credentials, so this archive is not notarised."
+    say "      Gatekeeper will refuse it on a Mac that has never run it, and the user will"
+    say "      have to right-click, Open, and confirm. Set CODECBLUE_NOTARY_PROFILE (or the"
+    say "      three CODECBLUE_NOTARY_KEY* variables) to have this step do it."
+elif [ -z "${CODECBLUE_SIGN_IDENTITY:-}" ]; then
+    say ""
+    say "note: notarisation needs a real signature first; skipping it because"
+    say "      CODECBLUE_SIGN_IDENTITY is not set. Apple rejects ad-hoc signed archives."
+else
+    say "notarising (this takes a minute or two)…"
+    # `notarytool` returns non-zero for "invalid" as well as for transport errors, and the useful
+    # part of the answer is in the log, not in the exit code. So the log is fetched either way.
+    if xcrun notarytool submit "$ZIP" $NOTARY_ARGS --wait --output-format json > "$DIST/notary.json" 2>&1; then
+        say "  accepted"
+    else
+        say "error: notarisation failed. The log follows." >&2
+        submission=$(sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' "$DIST/notary.json" | head -1)
+        [ -n "$submission" ] && xcrun notarytool log "$submission" $NOTARY_ARGS >&2 || true
+        cat "$DIST/notary.json" >&2
+        die "notarisation failed"
+    fi
+
+    # Stapling attaches the ticket to the archive itself, so the first launch works offline. Without
+    # it the ticket is fetched from Apple on first run, which fails on a plane and looks like the
+    # same "cannot be checked" dialog notarisation was supposed to remove.
+    say "stapling the ticket…"
+    xcrun stapler staple "$ZIP" || die "stapling failed"
+    xcrun stapler validate "$ZIP" || die "the stapled ticket does not validate"
+    # A marker for whatever writes the release notes, so that the notes describe this archive and
+    # not a condition re-derived from the same secrets somewhere else.
+    touch "$DIST/notarised"
+fi
+
+# The checksum, last and not earlier: stapling rewrites the archive, so a checksum taken before it
+# describes a file that no longer exists — and a checksum that fails on a good download is worse
+# than no checksum at all, because the user concludes the download is corrupt.
 ( cd "$DIST" && shasum -a 256 "CodecBlue-$VERSION.zip" > "CodecBlue-$VERSION.zip.sha256" )
+# The notary log can quote the submission id and the team, which belong in a bug report and not in
+# a public release asset.
+rm -f "$DIST/notary.json"
 
 say ""
 say "built $ZIP"

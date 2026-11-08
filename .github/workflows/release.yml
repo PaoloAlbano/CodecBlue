@@ -33,13 +33,49 @@ jobs:
       - name: Build and test
         run: make test
 
+      # The certificate has to be in a keychain before `codesign` can use it, and a keychain in CI
+      # has to be created, unlocked and (on macOS) given permission to be used without a prompt.
+      # The `.p12` and its password live in repository secrets and exist nowhere else.
+      - name: Import the signing certificate
+        if: ${{ secrets.CODECBLUE_SIGN_P12 != '' }}
+        env:
+          P12: ${{ secrets.CODECBLUE_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.CODECBLUE_SIGN_P12_PASSWORD }}
+        run: |
+          set -eu
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign
+          # Without this, `codesign` blocks on a GUI prompt that nobody can answer on a runner and
+          # the job hangs until it times out.
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
       - name: Package
         env:
-          # Optional. With a Developer ID in the repository secrets the archive is properly signed
-          # and notarisation can be added later; without it the archive is ad-hoc signed and the
-          # packaging script says so out loud instead of pretending.
+          # All of these are optional. With them the archive is signed, notarised and stapled, which
+          # is what makes it open on a Mac that has never seen it. Without them it is ad-hoc signed
+          # and the packaging script says so out loud instead of pretending.
           CODECBLUE_SIGN_IDENTITY: ${{ secrets.CODECBLUE_SIGN_IDENTITY }}
-        run: sh scripts/package.sh
+          CODECBLUE_NOTARY_KEY_ID: ${{ secrets.CODECBLUE_NOTARY_KEY_ID }}
+          CODECBLUE_NOTARY_ISSUER: ${{ secrets.CODECBLUE_NOTARY_ISSUER }}
+          # Passed as an environment variable and written to a file here, rather than interpolated
+          # into the shell: a secret pasted into a script body ends up in the log if the command is
+          # ever echoed, and a key that is valid for a year is worth not leaking.
+          NOTARY_KEY_P8: ${{ secrets.CODECBLUE_NOTARY_KEY_P8 }}
+        run: |
+          set -eu
+          if [ -n "${NOTARY_KEY_P8:-}" ]; then
+            printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+            chmod 600 "$RUNNER_TEMP/notary-key.p8"
+            export CODECBLUE_NOTARY_KEY="$RUNNER_TEMP/notary-key.p8"
+          fi
+          sh scripts/package.sh
 
       - name: Publish the release
         env:
@@ -77,6 +113,17 @@ jobs:
             echo '```'
             echo
             echo "Requires an Apple Silicon Mac and macOS 14.2 or later."
+            # What the notes say about Gatekeeper has to match what the archive actually is, so
+            # the packaging script leaves a marker rather than this step guessing from the same
+            # secrets a second time — two copies of a condition is two answers waiting to differ.
+            if [ -f ".build/dist/notarised" ]; then
+              echo
+              echo "Signed and notarised by Apple."
+            else
+              echo
+              echo "> This build is not notarised: on first launch macOS will refuse it and you"
+              echo "> have to right-click the app, choose Open, and confirm. That is expected."
+            fi
           } > notes.md
 
           # `--verify-tag` because the tag must already exist: this workflow runs *because* of a

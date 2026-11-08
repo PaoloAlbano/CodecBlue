@@ -72,7 +72,7 @@ if [ -z "$MENU_APP" ] || [ ! -d "$MENU_APP" ]; then
     exit 1
 fi
 
-echo "2/3 installing the programs into $APP_DIR…"
+echo "2/3 installing the programs into ${APP_DIR}…"
 mkdir -p "$APP_DIR"
 # The CLI and the media key helper go side by side: `codecblue` looks for `codecblue-keys` next
 # to itself, and the LaunchAgent points at this copy rather than at a build directory that
