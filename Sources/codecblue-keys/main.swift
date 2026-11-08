@@ -127,18 +127,62 @@ enum MediaRemote {
         send(command.rawValue, nil)
         return true
     }
+
+    /// The pid of the app the system considers "now playing", or 0 when there is none.
+    ///
+    /// This is the difference between a key that is delivered and a key that goes nowhere. The
+    /// media keys — HID ones included — are routed by mediaremoted to the registered Now Playing
+    /// client, and with no client there is no destination: the key is posted, nothing complains,
+    /// and nothing happens. Measured 2026-11-08 on this Mac: `nowPlayingPID=0` while a video
+    /// played in a browser, and every command was accepted and dropped.
+    static func nowPlayingPID() -> Int32 {
+        typealias GetPID = @convention(c) (DispatchQueue, @escaping @convention(block) (Int32) -> Void) -> Void
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
+                                  RTLD_NOW),
+              let symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationPID")
+        else { return -1 }
+        let get = unsafeBitCast(symbol, to: GetPID.self)
+        var result: Int32 = 0
+        let done = DispatchSemaphore(value: 0)
+        get(DispatchQueue.global()) { pid in
+            result = pid
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 1)
+        return result
+    }
 }
 
 func handle(_ line: String) -> Bool {
     switch line {
     case "play":
-        // Explicit, not a toggle: see MediaRemote. The HID key is the fallback for a system where
-        // the framework cannot be loaded, and there a toggle is all that exists.
+        // Explicit, for the case where a caller really does mean "play": MediaRemote has no
+        // toggle ambiguity. It only works when a Now Playing client is registered, so the HID
+        // toggle is the fallback — and the headphones' own button uses `toggle` instead, because
+        // one button means one thing.
         if !MediaRemote.send(.play) { post(.playPause) }
     case "pause":
         if !MediaRemote.send(.pause) { post(.playPause) }
     case "toggle":
-        if !MediaRemote.send(.togglePlayPause) { post(.playPause) }
+        // Say so when the key has nowhere to go. A key posted with no Now Playing client is
+        // indistinguishable, from the outside, from a key that was never posted — and that
+        // ambiguity is what made this take three attempts.
+        let pid = MediaRemote.nowPlayingPID()
+        if pid == 0 {
+            print("ok toggle but no now-playing client (pid 0): the key has no destination")
+            post(.playPause)
+            return true
+        }
+        // The HID key, deliberately, and not MediaRemote.
+        //
+        // `NX_KEYTYPE_PLAY` is exactly what a keyboard's play/pause key sends, and it is a
+        // toggle: the system routes it to whatever is playing. MediaRemote's
+        // `kMRTogglePlayPause` does the same thing but only when there is a *registered* Now
+        // Playing client — measured 2026-11-08 on this Mac: `nowPlayingPID=0` with a video
+        // playing in a browser, and every MediaRemote command was accepted and did nothing.
+        // The HID key goes through the same path a real keypress does, so it cannot be
+        // silently dropped for want of a client.
+        post(.playPause)
     case "next":
         if !MediaRemote.send(.nextTrack) { post(.next) }
     case "previous":

@@ -1603,3 +1603,152 @@ func volumeEchoTests() {
               "and the change is announced on the control")
     }
 }
+
+/// The Bluetooth permission belongs to this process, not to whatever launched it.
+///
+/// This is the bug that made the menu bar app silently useless: `codecblue` talks to bluetoothd
+/// over the classic XPC channel, which needs `kTCCServiceBluetoothAlways` — but nothing in that
+/// channel ever asks for it. Only CoreBluetooth asks. So the permission went to the terminal, and
+/// launching from launchd (which is how the app keeps the stream alive) got
+/// `TCC approval status: 1` and `state updated: Unsupported`, which reads as "this Mac has no
+/// Bluetooth".
+func bluetoothAuthorizationTests() {
+    test("the stream asks for the Bluetooth permission itself") {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let main = root.appendingPathComponent("Sources/codecblue/main.swift")
+        guard let text = try? String(contentsOf: main, encoding: .utf8) else {
+            check(false, "main.swift not readable")
+            return
+        }
+        check(text.contains("BluetoothAuthorization.request(log: log)"),
+              "playSystem asks before touching bluetoothd")
+        // And before the ring, which is where the first bluetoothd call happens.
+        if let ask = text.range(of: "BluetoothAuthorization.request(log: log)"),
+           let ring = text.range(of: "ring = try SharedRing()") {
+            check(ask.lowerBound < ring.lowerBound, "the asking comes first")
+        } else {
+            check(false, "both markers found")
+        }
+    }
+
+    test("waiting for CoreBluetooth is short, because the asking is the creation") {
+        // Measured 2026-11-08 under launchd: the delegate never fires at all — a bare binary has
+        // no run loop for the main queue — yet bluetoothd's approval goes from 1 to 2 and the
+        // classic channel works. So the wait is a courtesy, not a requirement, and a long one
+        // would be two seconds of silence at every start for nothing.
+        check(BluetoothAuthorization.timeout <= 3,
+              "a short wait: \(BluetoothAuthorization.timeout) s")
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent(
+            "Sources/CodecBlueCore/Bluetooth/BluetoothAuthorization.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "not readable")
+            return
+        }
+        check(text.contains("CBCentralManager(delegate: self, queue: nil)"),
+              "a manager is created, which is what triggers the request")
+        check(text.contains("carrying on"), "and a missing answer is not treated as a failure")
+    }
+
+    test("the launch agent does not depend on the launching context") {
+        // The agent is what makes the app work when the app is closed, so the permission has to
+        // be this binary's. Nothing in the plist may point at a path SwiftPM owns either.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Sources/CodecBlueCore/Audio/LaunchAgent.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "not readable")
+            return
+        }
+        check(!text.contains("/.build/out/"), "never SwiftPM's internal directory")
+        check(text.contains("LimitLoadToSessionType"), "and it is pinned to the GUI session")
+    }
+}
+
+/// One button on the headphones means one thing: toggle.
+///
+/// This is a correction of a correction, and the log settled it. The headphones send exactly one
+/// PASS THROUGH per gesture — measured five times across five sessions, always 0x46 (PAUSE),
+/// never a pair — and their one physical button is a play/pause toggle. So `pause` is not an
+/// instruction, it is the name of the button.
+///
+/// Sending an explicit PAUSE worked exactly once: the first gesture paused the player, the second
+/// asked an already-paused player to pause and nothing happened. A toggle cannot get stuck that
+/// way, because it does not depend on what the player already thinks it is doing.
+func headphoneButtonTests() {
+    test("a single press toggles, whatever the headphones call it") {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let main = root.appendingPathComponent("Sources/codecblue/main.swift")
+        guard let text = try? String(contentsOf: main, encoding: .utf8) else {
+            check(false, "main.swift not readable")
+            return
+        }
+        check(text.contains("mediaKeys.send(\"toggle\")"), "the button toggles")
+        check(!text.contains("let command = key == \"stop\" ? \"pause\" : key"),
+              "and no longer forwards the headphone's own word for it")
+    }
+
+    test("the toggle is the HID key, not a MediaRemote command") {
+        // `kMRTogglePlayPause` only works when a Now Playing client is registered. Measured
+        // 2026-11-08 on this Mac: nowPlayingPID=0 with a video playing in a browser, and every
+        // MediaRemote command was accepted and did nothing. The HID key goes through the path a
+        // real keypress takes, so it cannot be dropped for want of a client.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Sources/codecblue-keys/main.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "not readable")
+            return
+        }
+        if let toggle = text.range(of: "case \"toggle\":"),
+           let post = text.range(of: "post(.playPause)", range: toggle.upperBound..<text.endIndex) {
+            check(post.lowerBound > toggle.lowerBound, "toggle posts the HID key")
+        } else {
+            check(false, "toggle case found")
+        }
+        check(text.contains("nowPlayingPID=0") || text.contains("registered Now"),
+              "and the reason is written down")
+    }
+}
+
+/// A media key with no Now Playing client goes nowhere, and must say so.
+///
+/// This is the third attempt at the headphones' play/pause button, and the first one that can
+/// explain itself. The button works — the frame arrives, the helper is trusted, the key is posted.
+/// What was missing is a *destination*: mediaremoted routes media keys to the registered Now
+/// Playing client, and measured 2026-11-08 this Mac had `nowPlayingPID=0` while a video played in
+/// a browser. Every command was accepted and dropped, with nothing in any log to say why.
+///
+/// A minimal AVAudioPlayer that registers itself does receive the key, which is what proves the
+/// path works and the destination is the missing piece.
+func mediaKeyDestinationTests() {
+    test("the helper reports when a key has no destination") {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Sources/codecblue-keys/main.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "not readable")
+            return
+        }
+        check(text.contains("MRMediaRemoteGetNowPlayingApplicationPID"),
+              "it asks who would receive the key")
+        check(text.contains("no now-playing client"), "and says so when nobody would")
+    }
+
+    test("the stream puts that in its own log") {
+        // The listener reads the stream's log, not the helper's: a diagnosis that only exists in
+        // a pipe between two processes is a diagnosis nobody sees.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Sources/CodecBlueCore/Audio/MediaKeyHelper.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "not readable")
+            return
+        }
+        check(text.contains("no now-playing client"), "the stream log carries it")
+        check(text.contains("not ours"), "and says whose decision it is")
+    }
+}

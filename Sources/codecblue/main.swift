@@ -403,6 +403,19 @@ func playSystem(_ address: String, options: [String]) async throws {
         default: usage()
         }
     }
+    // Ask for the Bluetooth permission from *this* process, before touching bluetoothd.
+    //
+    // `codecblue` uses bluetoothd's classic XPC channel, and that channel needs
+    // `kTCCServiceBluetoothAlways` — but nothing in it ever asks for it. Only CoreBluetooth asks.
+    // So the permission went to whatever launched us: from a terminal macOS asked on behalf of the
+    // terminal and everything worked; from launchd nobody asked, bluetoothd found no approval and
+    // answered "state updated: Unsupported", which reads as "this Mac has no Bluetooth". Measured
+    // 2026-11-08: same binary, same arguments, `status: 2` / "On" from a terminal and `status: 1` /
+    // "Unsupported" under launchd, four times each way.
+    //
+    // Creating a CBCentralManager here is the asking. It is not used for anything else.
+    BluetoothAuthorization.request(log: log)
+
     let ring: SharedRing
     do {
         ring = try SharedRing()
@@ -559,15 +572,33 @@ func playSystem(_ address: String, options: [String]) async throws {
             }
             say("headphone volume button: the device refused the change")
             return false
-        case "play", "pause", "next", "previous", "stop":
-            // `stop` has no media key of its own: pause is the closest thing the system has, and
-            // pretending otherwise would need a second event nobody asked for.
-            let command = key == "stop" ? "pause" : key
+        case "play", "pause", "stop":
+            // A single button on the headphones means ONE thing: toggle.
+            //
+            // This is the correction of a correction, and the log is what settled it. The
+            // headphones send exactly one PASS THROUGH per gesture — measured five times across
+            // five sessions, always `0x46` (PAUSE), never a pair — and their one physical button
+            // is a play/pause toggle. So `pause` is not an instruction, it is the name of the
+            // button.
+            //
+            // Sending an explicit PAUSE for it worked exactly once: the first gesture paused the
+            // player, the second gesture asked an already-paused player to pause, and nothing
+            // happened — "la prima volta il doppio clic ha messo pausa, ora non funziona più".
+            // A toggle cannot get stuck that way, because it does not depend on what the player
+            // already thinks it is doing.
             guard let mediaKeys else {
                 say("headphone button \(key): no media key helper, so nothing was sent")
                 return false
             }
-            mediaKeys.send(command)
+            mediaKeys.send("toggle")
+            say("headphone button \(key): toggled play/pause")
+            return true
+        case "next", "previous":
+            guard let mediaKeys else {
+                say("headphone button \(key): no media key helper, so nothing was sent")
+                return false
+            }
+            mediaKeys.send(key)
             say("headphone button \(key): forwarded to the system")
             return true
         default:

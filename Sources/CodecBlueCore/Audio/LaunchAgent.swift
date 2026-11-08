@@ -63,6 +63,8 @@ public enum LaunchAgent {
             <string>\(logPath)</string>
             <key>ProcessType</key>
             <string>Interactive</string>
+            <key>LimitLoadToSessionType</key>
+            <string>Aqua</string>
         </dict>
         </plist>
 

@@ -64,6 +64,14 @@ public final class MediaKeyHelper: @unchecked Sendable {
                             + "Grant it in System Settings > Privacy & Security > Accessibility.")
                     } else if answer.hasPrefix("unknown") {
                         log("media keys: helper did not understand \(answer)")
+                    } else if answer.contains("no now-playing client") {
+                        // The most useful line this feature can print. A media key is routed by
+                        // mediaremoted to the registered Now Playing client; with none, the key
+                        // is posted and goes nowhere, silently. Measured 2026-11-08: a video
+                        // playing in a browser and `nowPlayingPID=0`.
+                        log("media keys: the button was read and the key posted, but macOS has no "
+                            + "now-playing client to send it to, so nothing can pause. This is "
+                            + "the player's decision, not ours.")
                     }
                 }
             }
