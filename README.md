@@ -55,8 +55,7 @@ Requirements: Xcode Command Line Tools (Swift 6). Full Xcode is not needed.
 ```sh
 git clone --recurse-submodules <repo-url>
 cd codecblue
-swift build
-swift run codecblue-selftest      # unit tests
+make test                          # build + the unit tests (what CI runs)
 .build/debug/codecblue version
 .build/debug/codecblue lookup AA:BB:CC:DD:EE:FF   # what bluetoothd knows about your headphones
 .build/debug/codecblue probe  AA:BB:CC:DD:EE:FF   # list the codecs they support (takes them for a few seconds)
@@ -144,7 +143,7 @@ worse. Testing a link with such a file tests the file. This cost a day.
 | `Sources/codecblue/` | Command-line tool |
 | `Sources/codecblue-keys/` | Media key helper — the only binary that needs Accessibility permission |
 | `Sources/CodecBlueMenu/` | The menu bar app: a client of the control channel, no audio code |
-| `Sources/codecblue-selftest/` | Unit tests (run with `swift run codecblue-selftest`) |
+| `Sources/codecblue-selftest/` | Unit tests (run with `make test`) |
 | `Driver/CodecBlueDriver/` | The virtual output device (a C AudioServerPlugIn) |
 | `scripts/build-driver.sh` | Builds the driver, and installs or removes it with `--install` / `--uninstall` |
 | `scripts/build-menu-app.sh` | Assembles `CodecBlueMenu.app` (a bundle is needed for `LSUIElement`) |

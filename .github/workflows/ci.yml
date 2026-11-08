@@ -11,9 +11,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Build
-        run: swift build
-      - name: Unit tests
-        run: swift run codecblue-selftest
-      - name: Smoke test
-        run: .build/debug/codecblue version
+      # `make test` and not `swift run codecblue-selftest`, so that a green CI and a green
+      # `make test` on a laptop mean the same thing. The first version of this file ran the test
+      # binary directly and drifted from what a person runs by hand — which is how a test that
+      # depended on the machine (an installed copy of the app in ~/Applications) passed here and
+      # failed on the runner.
+      - name: Build and test
+        run: make test

@@ -1528,14 +1528,47 @@ func launchAgentAppTests() {
         // `.build/out/Products/Debug` is deleted by `swift package clean`; `.build/debug` is the
         // symlink SwiftPM maintains, and `~/Applications/CodecBlue` is where `install.sh` puts the
         // copy that outlives both. This mistake has been made once already.
-        let invoked = URL(fileURLWithPath: "/repo/.build/out/Products/Debug/codecblue")
-        let resolved = LaunchAgent.resolveExecutable(from: invoked)
+        //
+        // The installed path is passed in rather than discovered, because the rule is about what
+        // `resolveExecutable` *does*, not about what this machine happens to have installed. The
+        // first version discovered it, so on a machine with the app installed it tested the first
+        // branch and on CI — which has no ~/Applications/CodecBlue — it fell through to the
+        // fallback and failed on a path that was correct for that machine. A test that depends on
+        // the machine is a test that fails in someone else's checkout.
+        // A checkout built by hand: the binary SwiftPM produces lives in .build/out/Products/
+        // Debug, and .build/debug/codecblue is the symlink it maintains. The rule is that the
+        // second is what goes in the plist, and it is checked on a real tree rather than on a
+        // string, because the walking is the part that can be wrong.
+        let root = URL(fileURLWithPath: "/tmp/codecblue-selftest-resolve-\(getpid())")
+        let out = root.appendingPathComponent(".build/out/Products/Debug")
+        let stable = root.appendingPathComponent(".build/debug")
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: stable, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let invoked = out.appendingPathComponent("codecblue")
+        FileManager.default.createFile(atPath: invoked.path, contents: Data("#!/bin/sh\n".utf8),
+                                       attributes: [.posixPermissions: 0o755])
+        FileManager.default.createFile(atPath: stable.appendingPathComponent("codecblue").path,
+                                       contents: Data("#!/bin/sh\n".utf8),
+                                       attributes: [.posixPermissions: 0o755])
+        let absent = URL(fileURLWithPath: "/nowhere/Applications/CodecBlue/codecblue")
+        let resolved = LaunchAgent.resolveExecutable(from: invoked, installed: absent)
         check(!resolved.contains("/.build/out/"), "never SwiftPM's internal directory: \(resolved)")
-        // Whatever it settles on must be a path that exists, or the agent fails at login with
-        // nothing in its log but "no such file".
-        check(FileManager.default.isExecutableFile(atPath: resolved)
-              || resolved == invoked.path,
-              "either a real path or an honest fallback: \(resolved)")
+        check(resolved == stable.appendingPathComponent("codecblue").path,
+              "the stable symlink wins over the products directory: \(resolved)")
+        // And when an installed copy exists, it wins over everything — including a checkout.
+        let installed = root.appendingPathComponent("Applications/CodecBlue/codecblue")
+        try? FileManager.default.createDirectory(at: installed.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: installed.path, contents: Data("#!/bin/sh\n".utf8),
+                                       attributes: [.posixPermissions: 0o755])
+        check(LaunchAgent.resolveExecutable(from: invoked, installed: installed) == installed.path,
+              "the installed copy wins when it is there")
+        // With nothing anywhere, the honest answer is the path it was given: a wrong path in the
+        // plist is a "no such file" at login, and inventing a better-looking one would hide that.
+        let empty = URL(fileURLWithPath: "/tmp/codecblue-selftest-empty-\(getpid())/codecblue")
+        check(LaunchAgent.resolveExecutable(from: empty, installed: absent) == empty.path,
+              "an honest fallback")
     }
 
     test("the plist carries the address and the arguments") {
@@ -1620,19 +1653,15 @@ func installLayoutTests() {
     test("the agent prefers the installed copy over a build directory") {
         // `swift package clean` deletes .build, so an agent pointing there breaks the next time
         // anyone cleans. The installed copy is the one that survives.
-        let installed = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Applications/CodecBlue/codecblue")
         let invoked = URL(fileURLWithPath: "/repo/.build/debug/codecblue")
-        let resolved = LaunchAgent.resolveExecutable(from: invoked)
-        // Either the installed copy exists and wins, or we are in a checkout where it does not
-        // and the build path is the right answer. Both are correct; what must never happen is a
-        // path into .build/out, which SwiftPM deletes.
+        let resolved = LaunchAgent.resolveExecutable(
+            from: invoked, installed: URL(fileURLWithPath: "/nowhere/Applications/CodecBlue/codecblue"))
+        // What must never happen is a path into .build/out, which SwiftPM deletes; and with
+        // nothing installed the answer is the .build/debug path it was given, which is the stable
+        // symlink SwiftPM maintains. Passed in, not discovered: see the note in
+        // `launchAgentAppTests` about a test that depends on the machine it runs on.
         check(!resolved.contains("/.build/out/"), "never SwiftPM's internal directory: \(resolved)")
-        if FileManager.default.isExecutableFile(atPath: installed.path) {
-            check(resolved == installed.path, "the installed copy wins")
-        } else {
-            check(resolved.hasSuffix("/.build/debug/codecblue"), "falls back to the stable symlink")
-        }
+        check(resolved == invoked.path, "the path it was given, which is already the stable one")
     }
 
     test("the three locations are distinct and none is inside the repository") {

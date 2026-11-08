@@ -28,8 +28,7 @@ The repository directory may still be called `ldac_mac`; the project is CodecBlu
 
 ```sh
 git submodule update --init
-swift build
-swift run codecblue-selftest                     # unit tests
+make test                                        # build + unit tests (what CI runs)
 .build/debug/codecblue version
 .build/debug/codecblue lookup AA:BB:CC:DD:EE:FF  # read-only: what bluetoothd knows
 .build/debug/codecblue probe  AA:BB:CC:DD:EE:FF  # takes the headphones briefly (ask first)
@@ -37,8 +36,14 @@ swift run codecblue-selftest                     # unit tests
 
 Unit tests are plain functions in `Sources/codecblue-selftest/` (`test("name") { check(...) }`).
 XCTest is missing from the Command Line Tools and Swift Testing needs Xcode's macro plugins,
-so neither can be used. CI (`.github/workflows/ci.yml`) runs the build and the self-test;
-both must pass.
+so neither can be used. CI (`.github/workflows/ci.yml`) runs `make test`, which is the same
+command you run by hand: a green CI and a green laptop must mean the same thing.
+
+A test must not depend on the machine it runs on. Everything that reads the system — the
+installed copy of the app, a real audio device, paired headphones, a loaded driver — either
+takes its answer as an argument or is skipped with a reason. The first CI run failed on a test
+that discovered `~/Applications/CodecBlue` and asserted it had won: correct on a laptop with
+the app installed, wrong on a runner without it.
 
 ## Hard rules
 

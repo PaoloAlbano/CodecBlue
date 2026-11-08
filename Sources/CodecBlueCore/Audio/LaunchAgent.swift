@@ -128,11 +128,20 @@ public enum LaunchAgent {
     /// `.build/out/Products/Debug`, which `swift package clean` deletes: the agent would then fail
     /// at login with nothing in its log but "no such file". `.build/debug` is the symlink SwiftPM
     /// maintains. This mistake has been made once already, in the CLI, so it lives in one place.
-    static func resolveExecutable(from invoked: URL) -> String {
+    static func resolveExecutable(from invoked: URL, installed: URL? = nil) -> String {
         // The installed copy wins. `scripts/install.sh` puts the CLI in ~/Applications/CodecBlue,
         // and that copy is the one that survives `swift package clean` — pointing the agent at a
         // build directory means the agent breaks the next time anyone cleans the build.
-        let installed = FileManager.default.homeDirectoryForCurrentUser
+        //
+        // `installed` is a parameter and not a constant because this function has two callers with
+        // two different questions. The stream asks "where is the program that will still be here at
+        // the next login?", and the answer depends on this machine. The self-test asks "what does
+        // the rule *do*?", and it has to be able to answer without a machine that happens to have
+        // the app installed — otherwise the rule is only tested on the developer's Mac, and CI
+        // fails on a test that is right about the code and wrong about the machine. Measured
+        // 2026-11-08: the GitHub runner has no ~/Applications/CodecBlue, so the fallback branch ran
+        // and the assertion about the installed copy could not hold.
+        let installed = installed ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications/CodecBlue/codecblue")
         if FileManager.default.isExecutableFile(atPath: installed.path) {
             return installed.path
