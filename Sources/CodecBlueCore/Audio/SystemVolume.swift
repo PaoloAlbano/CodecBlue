@@ -119,6 +119,20 @@ public final class SystemVolume: @unchecked Sendable {
         return position
     }
 
+    /// The last position pushed down the link, if one was pushed recently.
+    ///
+    /// It exists so the log can tell the two attenuations apart when it reports the volume: the
+    /// gain applied here and the attenuation the headphones are holding are different numbers by
+    /// design, and a report that shows only the first is indistinguishable from the double
+    /// attenuation bug that cost an evening (§13.43).
+    public var lastPushed: Float? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let pushed else { return nil }
+        let seconds = Double(DispatchTime.now().uptimeNanoseconds &- pushed.at) / 1e9
+        return seconds <= 5 ? pushed.value : nil
+    }
+
     public var isMuted: Bool {
         lock.lock()
         defer { lock.unlock() }

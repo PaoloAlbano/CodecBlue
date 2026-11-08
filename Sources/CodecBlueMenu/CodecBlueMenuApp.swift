@@ -64,14 +64,30 @@ struct ContentView: View {
 
         Divider()
 
-        // The level. Changing it does not interrupt the stream: libldac changes the frame size it
-        // produces and every packet carries its own frame count.
+        // The ladder, not three names, and the rung this link can actually carry ticked.
+        //
+        // libldac has five EQMIDs (990 / 660 / 492 / 396 / 330 at 48 kHz) and Sony named only
+        // three of them. The two in the middle are what make a rate that follows the link
+        // possible: a link that carries ~530 kbps has to choose between 660 (a third of the audio
+        // thrown away) and 330 (half the bitrate left on the table), and 492 is the answer.
+        //
+        // So the menu lists the ladder highest first, spells out the three named rungs, shows the
+        // bitrate for the two that have no name, and ticks the one the stream would settle on
+        // here. The tick on the *playing* rung is separate and comes from `model.quality`.
+        //
+        // Changing it does not interrupt the stream: libldac changes the frame size it produces
+        // and every packet carries its own frame count.
         Menu("Quality") {
-            ForEach(["HQ", "SQ", "MQ"], id: \.self) { level in
+            ForEach(QualityLevels.describe(capacityKbps: model.linkKbps,
+                                           sampleRate: model.streamRate), id: \.rung) { level in
                 Button {
-                    model.setQuality(level)
+                    model.setQuality("\(level.rung)")
                 } label: {
-                    Text(model.quality == level ? "✓ \(level)" : "  \(level)")
+                    // The tick follows what is *playing*, not what was asked for: the rung
+                    // settles on its own when the link cannot carry the one chosen.
+                    let playing = model.qualityRung == level.rung && model.quality != "unknown"
+                    Text((playing ? "✓ " : "  ")
+                         + QualityLevels.menuLabel(level, capacityKbps: model.linkKbps))
                 }
             }
             Divider()
@@ -80,6 +96,9 @@ struct ContentView: View {
             } label: {
                 Text(model.adapt ? "✓ Let it choose" : "  Let it choose")
             }
+            Text(model.adapt
+                 ? "It settles on the best level this link carries"
+                 : "A level is a ceiling: it drops if the link cannot carry it")
         }
 
         Menu("Latency") {
@@ -106,11 +125,11 @@ struct ContentView: View {
                     Text(model.deviceRate == rate ? "✓ \(rate) Hz" : "  \(rate) Hz")
                 }
             }
-            Divider()
-            // 44.1 is the native rate of nearly all music; 48 avoids a conversion for everything
-            // else. Anything above is offered by the headphones but costs link budget for nothing
-            // audible, so it is not in the menu.
-            Text("44.1 kHz is the native rate of most music")
+            // No explanatory line here on purpose. It used to read "44.1 kHz is the native rate
+            // of most music", which is true in general and false in this menu: the device is
+            // configured at 48 kHz, and a sentence about 44.1 next to a tick on 48 is a
+            // contradiction the reader has to resolve for themselves. The rates are labelled;
+            // that is all this menu needs to say.
         }
 
         if model.isStreaming {

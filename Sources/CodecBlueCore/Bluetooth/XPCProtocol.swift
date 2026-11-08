@@ -47,6 +47,10 @@ public struct XPCProtocol: Sendable {
     public var connectServices: Int64 = 4096
     /// `kCBMsgArgState` once Bluetooth is powered on.
     public var statePoweredOn: Int64 = 5
+    /// `kCBMsgArgState` once Bluetooth is powered off. Distinct from "not 5": a radio that is
+    /// turning on reports states in between, and treating those as "off" ended streams on a
+    /// machine whose Bluetooth was on (measured 2026-11-08).
+    public var statePoweredOff: Int64 = 4
 
     public static let macOS26 = XPCProtocol(name: "macOS 26-27")
 

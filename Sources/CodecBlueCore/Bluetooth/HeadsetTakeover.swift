@@ -50,6 +50,16 @@ public enum TakeoverError: Error, CustomStringConvertible {
 public final class HeadsetTakeover: @unchecked Sendable {
     public let address: String
     public let timing: TakeoverTiming
+
+    /// Called the moment macOS has published the headphones' audio device, which is the only
+    /// window in which bluetoothd has a `-tacl` device for `StartAudio` to land on.
+    ///
+    /// It exists because the link quality mode has to be asked for *in that window*, and the
+    /// window is short and unpredictable: the takeover closes the media channel seconds later and
+    /// bluetoothd erases the device with it. Measured 2026-11-08: the device was registered at
+    /// 19:03:26.986 and erased at 19:03:27.707, and a keeper that asked once a second from a
+    /// different starting point missed all of it — 65% of the audio dropped, heard as crackle.
+    public var onSystemConnected: (@Sendable () -> Void)?
     public private(set) var device: UUID?
     public private(set) var signalSession: ClassicXPCSession?
     public private(set) var signaling: SignalingChannel?
@@ -131,6 +141,9 @@ public final class HeadsetTakeover: @unchecked Sendable {
             let up = (try? await control.lookup(address: address).isLinkUp) ?? false
             if up && SystemHeadphoneAudio.hasDevice(address: address) {
                 log("macOS connected the headphones' audio")
+                // The one moment `StartAudio` is certain to land: bluetoothd has just published
+                // the device. See `onSystemConnected`.
+                onSystemConnected?()
                 try await Task.sleep(for: .seconds(timing.systemConnectSettle))
                 return
             }

@@ -5,9 +5,17 @@ public final class A2DPStreamer: @unchecked Sendable {
     public struct Configuration: Sendable {
         public let remoteSEID: UInt8
         public let sampleRate: Int
-        public let quality: LDACEncoder.Quality
+        /// The rung the stream starts on and may not climb above, 0 (990 kbps) … 4 (330 kbps).
+        ///
+        /// A number and not a `Quality`, because the ladder has five rungs and Sony named three:
+        /// a link that carries ~530 kbps wants 492, which is neither "HQ" nor "SQ" and is the
+        /// whole reason the choice is made in kbps.
+        public let rung: Int
         public let mtu: Int
         public let delayReporting: Bool
+
+        /// What to call the starting rung in a log line: `HQ`, `SQ`, `LQ`, or the bitrate.
+        public var rungName: String { LDACEncoder.name(rung: rung, sampleRate: sampleRate) }
     }
 
     public enum StreamError: Error, CustomStringConvertible {
@@ -131,9 +139,12 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// and clears it. Changing the level does not renegotiate AVDTP — libldac changes the frame
     /// size it produces, and the packets carry their own frame count, so the stream continues.
     ///
-    /// It also turns the automatic adapter off: a level chosen by hand that the adapter then
-    /// overrides is worse than no choice at all.
-    public var requestedQuality: LDACEncoder.Quality?
+    /// It is a *ceiling*, not a place to sit. Choosing HQ on a link that carries 500 kbps used to
+    /// mean 45% of the audio thrown away for as long as HQ stayed selected — measured 2026-11-08,
+    /// and described by the listener as "inascoltabile". So a level chosen by hand sets the
+    /// ceiling and the stream settles below it if the link cannot carry it: HQ means "as good as
+    /// this link allows, up to HQ".
+    public var requestedRung: Int?
 
     /// A cushion asked for from outside the stream, in seconds, applied at the next window.
     ///
@@ -154,12 +165,22 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// step. See the call site for what happens without it.
     public var onSkip: (@Sendable (Int) -> Void)?
 
-    /// The level the encoder is producing right now, for the control channel.
+    /// Called once, right after the stream is started (AVDTP START acknowledged). The link quality
+    /// mode is the reason it exists: see the call site in `setUp`.
+    public var onStreamStarted: (@Sendable () -> Void)?
+
+    /// The rung the encoder is producing right now, for the control channel.
     ///
     /// The encoder itself lives on the audio thread and must not be read from another one. This
     /// is a plain copy, published once per report window, which is often enough for a status
-    /// line and never races the codec.
-    public private(set) var currentQuality: LDACEncoder.Quality?
+    /// line and never races the codec. It is the rung and not the `Quality`, because two of the
+    /// five rungs have no `Quality` case and the status line has to be able to say "492 kbps".
+    public private(set) var currentRung: Int?
+    /// What the encoder is producing, in kbit/s, as of the last report window.
+    public private(set) var currentBitrateKbps: Int?
+    /// The rate the encoder is running at, which decides what the three levels are worth: at
+    /// 44.1 kHz they are 909 / 606 / 303, not 990 / 660 / 330.
+    public private(set) var currentSampleRate: Int?
 
     /// The cushion the queue is allowed right now, in seconds. Published once per window, like
     /// `currentQuality`, because the queue itself lives on the audio thread.
@@ -167,6 +188,36 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// This is the number that *is* the latency: everything held between the driver and the socket
     /// is heard late by exactly this much.
     public private(set) var currentCushion: TimeInterval = 0
+
+    /// The most packets the socket took in one drain during the last report window.
+    ///
+    /// This is the honest measure of the link quality mode. `at most 2–3` is the LQM off (~50
+    /// kbps); `at most 60–500` is the LQM on (§13.12 of the notes). It is published here because
+    /// the alternative — reading bluetoothd's log for `Register audio device` — says nothing: that
+    /// device is erased 600 ms after it appears, by the takeover itself, so the log-based indicator
+    /// reads `off` on a link that is running at 336 kbps with no drops. Measured 2026-11-08.
+    public private(set) var currentBurst = 0
+
+    /// How many times the socket refused a packet in the last report window.
+    ///
+    /// It qualifies `currentBurst`: a window with no stall has no burst to measure, and reading
+    /// that as "0 packets per drain" would say the link is slow when in fact it never refused
+    /// anything. Zero stalls is the best answer there is, and it must not look like the worst.
+    public private(set) var currentStalls = 0
+
+    /// The link's measured capacity in kbit/s, or 0 when it has not been measured.
+    ///
+    /// Only a window in which the socket *refused* something measures the link: then the
+    /// throughput is the ceiling, because the level asked for more and got this. A clean window
+    /// measures nothing at all — it reports what the codec produced, which is the level's own
+    /// bitrate and not the link's limit. Measured 2026-11-08: while MQ played cleanly this read
+    /// 334 kbps, and calling that "the capacity" made the menu say MQ was too much for the link
+    /// that was carrying it.
+    ///
+    /// So 0 means "not known", and everything that shows this number says so rather than
+    /// guessing. Choosing a level above the link is what measures it, which is also why the
+    /// settle rule can act on it: it only ever fires on a window that dropped audio.
+    public private(set) var currentCarriedKbps = 0.0
 
     /// The headphones' battery, as last reported, or nil if they have not said.
     public private(set) var batteryPercent: Int?
@@ -221,7 +272,7 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// - Parameter sampleRate: the rate to ask for, or nil to take the best the headphones offer.
     ///   A rate they do not support is not an error: the next one they do support is used, and
     ///   the log says so. See `StreamError.unsupportedRate` for the case where they offer none.
-    public func setUp(sampleRate: Int?, quality: LDACEncoder.Quality) async throws -> Configuration {
+    public func setUp(sampleRate: Int?, rung: Int) async throws -> Configuration {
         // Hold AVRCP before the media channel: some headphones refuse it afterwards (Bathys,
         // per Blue Bloom), and holding it keeps macOS from reconnecting its profiles.
         if holdAVRCP {
@@ -318,9 +369,19 @@ public final class A2DPStreamer: @unchecked Sendable {
             + "socket send buffer \(buffers.send), low water \(buffers.lowWater))")
         _ = try await signaling.command(.start, Data([ldac.seid << 2]))
         log("stream started")
+        // The link quality mode is asked for again here, and this is the moment that matters.
+        //
+        // bluetoothd unpublishes its audio device when the media channel is closed, which is what
+        // the takeover does — so from that instant until it republishes (~14 s, measured
+        // 2026-11-08) every `BTAudioMsgIdStartAudio` is answered `No device found for uid` and the
+        // link stays at `at most 3 packet(s) per drain`: ~50 kbps, heard as crackle. The keeper's
+        // first message goes out ~2 s before the takeover, and its next one a full period later.
+        // Asking once more right after the stream starts costs one message and catches the case
+        // where the device is still published.
+        onStreamStarted?()
 
         let configuration = Configuration(
-            remoteSEID: ldac.seid, sampleRate: rate, quality: quality,
+            remoteSEID: ldac.seid, sampleRate: rate, rung: min(4, max(0, rung)),
             mtu: media?.mtu ?? Int(channel.outMTU), delayReporting: ldac.delay
         )
         self.configuration = configuration
@@ -366,8 +427,12 @@ public final class A2DPStreamer: @unchecked Sendable {
         // libldac sizes its output for the whole A2DP packet: RTP header + LDAC media header +
         // frames. Pass it the media MTU, not the payload room, or every packet it produces is
         // larger than the socket buffer and the socket reports full on every write.
-        let encoder = try LDACEncoder(sampleRate: configuration.sampleRate, quality: configuration.quality,
+        // Start on the rung the listener asked for, then step to it: `ldacBT_set_eqmid` refuses the
+        // two undocumented rungs, and stepping is also how the encoder keeps its frame length
+        // consistent with the packet type.
+        let encoder = try LDACEncoder(sampleRate: configuration.sampleRate, level: .hq,
                                       mtu: min(configuration.mtu, 1024))
+        encoder.move(toRung: configuration.rung)
         let rate = configuration.sampleRate
         let block = LDACEncoder.framesPerCall
         // Consecutive windows with no stall at all, needed before the queue narrows again.
@@ -380,10 +445,7 @@ public final class A2DPStreamer: @unchecked Sendable {
         // adapter starts there and only probes upwards if the link has been clean for a while.
         // Starting at the ceiling is what removes the opening glitch: HQ on a link that carries
         // 500 kbps throws away half the audio for the first windows, and that is audible.
-        var adapter = BitrateAdapter(ceiling: configuration.quality)
-        if adaptBitrate, encoder.quality != configuration.quality {
-            encoder.quality = configuration.quality
-        }
+        var adapter = BitrateAdapter(ceilingRung: configuration.rung)
 
         // A file has an end; the virtual device does not. `total` is only meaningful for a file.
         let total = endless ? Int.max : (totalFrames ?? feed(0).count / 2)
@@ -720,6 +782,10 @@ public final class A2DPStreamer: @unchecked Sendable {
             if now &- lastReport >= UInt64(interval * 1e9) {
                 let window = max(Double(now - lastReport) / 1e9, 0.001)
                 let dropped = stats.droppedFraction(sampleRate: encoder.sampleRate, window: window)
+                // The throughput has to be read here, before `report()`: it consumes the window's
+                // counters, so asking afterwards returned 0 and the settle rule below divided by
+                // nothing — measured 2026-11-08, `HQ does not fit this link (0 kbps carried)`.
+                let carriedKbps = stats.sentKbps(window: window)
                 let fill = queue.queuedDuration / max(queueDuration, 0.001)
                 // The queue's own adaptation, *before* the report: report() resets the stall
                 // counter, so asking afterwards always said "no stalls" and the queue never
@@ -731,6 +797,11 @@ public final class A2DPStreamer: @unchecked Sendable {
                 // exactly what the first version did.
                 let stallSeconds = meter.stallSeconds
                 let longest = meter.longestStall
+                // Read before `report()`: it consumes the window and resets these counters, so
+                // asking afterwards always returned zero — measured 2026-11-08, `packets_per_drain`
+                // read 0 on a link that was taking 60 packets per drain.
+                let burst = meter.longestBurst
+                let stallCount = meter.stalls
                 // Widen only when the stall *outlasted* the cushion: a 46 ms refusal is
                 // absorbed by an 80 ms cushion and needs no more room. The earlier rule was
                 // "half the cushion", which widened for stalls the cushion already covered —
@@ -781,12 +852,23 @@ public final class A2DPStreamer: @unchecked Sendable {
                 }
                 // A level chosen from outside wins, and turns the adapter off: see
                 // `requestedQuality`.
-                currentQuality = encoder.quality
+                currentRung = encoder.rung
+                currentBitrateKbps = encoder.bitrateKbps
+                currentSampleRate = encoder.sampleRate
                 currentCushion = queue.maxDuration
-                if let requested = requestedQuality {
-                    requestedQuality = nil
-                    if encoder.quality != requested {
-                        encoder.quality = requested
+                currentBurst = burst
+                currentStalls = stallCount
+                // Only a window that *lost audio* measures the ceiling; see `currentCarriedKbps`.
+                //
+                // A refusal the queue absorbed is not evidence about the link: the cushion exists
+                // precisely to absorb those, and treating them as the ceiling made MQ — playing
+                // cleanly at 334 kbps — look "too much for this link (334)". Measured 2026-11-08.
+                if dropped > 0.02 { currentCarriedKbps = carriedKbps }
+                if let requested = requestedRung {
+                    requestedRung = nil
+                    adapter.ceilingRung = requested
+                    if encoder.rung != requested {
+                        encoder.move(toRung: requested)
                         // Drop what is queued. Those packets were encoded at the old level, and
                         // the queue is the one thing that cannot be resized: a level change makes
                         // the encoder produce a different frame size, and the packets already
@@ -798,20 +880,62 @@ public final class A2DPStreamer: @unchecked Sendable {
                         // Clearing it costs at most the cushion (60 ms) and is over at once;
                         // keeping it costs seconds of distortion.
                         queue.removeAll()
-                        log("quality: set to LDAC \(requested.name) by request (queue cleared)")
+                        log("quality: set to \(encoder.bitrateKbps) kbps by request (queue cleared)")
+                    }
+                }
+                // Settle on what the link can carry, whether or not the adapter is on.
+                //
+                // A level above the link's ceiling is not a preference, it is a fault: it throws
+                // away a third to a half of the audio and it is heard as crackle. The adapter's
+                // step-by-step walk cannot be relied on for this — it moves one level per
+                // `minimumInterval`, so HQ → MQ is eight seconds of garbage, and it stops at SQ
+                // because SQ "only" drops 24%. So when a window drops audio, the throughput it
+                // achieved is the link's capacity and the level is taken from that number.
+                //
+                // It never climbs above `chosenCeiling`: asking for MQ and getting HQ would be a
+                // different bug, the mirror of this one.
+                // No ceiling test here: the ceiling limits how far *up* the stream may climb, and
+                // this only ever moves down. Comparing against it was the first version's bug —
+                // `HQ < HQ` is false, so the rule never fired at the one level that needed it.
+                if dropped > 0.02 {
+                    let fittedRung = BitrateAdapter.fitRung(capacityKbps: carriedKbps,
+                                                            sampleRate: encoder.sampleRate)
+                    if fittedRung > encoder.rung {
+                        let abandoned = LDACEncoder.name(rung: encoder.rung,
+                                                         sampleRate: encoder.sampleRate)
+                        // Tell the adapter, or it climbs straight back into the rung that just
+                        // failed: see `noteTooHigh`.
+                        adapter.noteTooHigh(encoder.rung)
+                        // And lower the ceiling to what the link has just been measured to carry.
+                        //
+                        // Blocking the level is not enough: the block expires (30 s, then 60), and
+                        // every expiry is an audible probe of a level this link cannot carry —
+                        // measured 2026-11-08, `up to LDAC SQ` at 64.9 s and back down at 79.9 s
+                        // with 30% dropped. The ceiling is the honest place for this fact: the
+                        // link has shown its hand, and a level above it is not a preference any
+                        // more. Choosing a level by hand raises the ceiling again, which is the
+                        // only thing that should.
+                        adapter.ceilingRung = fittedRung
+                        encoder.move(toRung: fittedRung)
+                        // The queue holds packets encoded at the old rung, and they are both
+                        // stale and the wrong shape: see the note in the request block above.
+                        queue.removeAll()
+                        log(String(format: "quality: LDAC %@ does not fit this link "
+                                   + "(%.0f kbps carried, %.0f%% dropped): settled on %d kbps",
+                                   abandoned, carriedKbps, dropped * 100, encoder.bitrateKbps))
                     }
                 }
                 if adaptBitrate {
-                    switch adapter.decide(current: encoder.quality, dropped: dropped, queueFill: fill) {
+                    switch adapter.decide(current: encoder.rung, dropped: dropped, queueFill: fill) {
                     case .hold:
                         break
-                    case let .down(quality):
-                        encoder.quality = quality
-                        log(String(format: "bitrate: down to LDAC %@ (%.0f%% dropped, queue %.0f%%)",
-                                   quality.name, dropped * 100, fill * 100))
-                    case let .up(quality):
-                        encoder.quality = quality
-                        log("bitrate: up to LDAC \(quality.name) (the link has been clean)")
+                    case let .down(rung):
+                        encoder.move(toRung: rung)
+                        log(String(format: "bitrate: down to %d kbps (%.0f%% dropped, queue %.0f%%)",
+                                   encoder.bitrateKbps, dropped * 100, fill * 100))
+                    case let .up(rung):
+                        encoder.move(toRung: rung)
+                        log("bitrate: up to \(encoder.bitrateKbps) kbps (the link has been clean)")
                     }
                 }
                 reportsSoFar += 1

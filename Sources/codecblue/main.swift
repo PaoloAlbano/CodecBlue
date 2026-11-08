@@ -7,7 +7,7 @@
 //   codecblue link ADDRESS       Time the link with the headphones idle (sniff or active?).
 //   codecblue release ADDRESS    Recovery: drop the headphones' link and let macOS reconnect
 //                                them normally.
-//   codecblue play ADDRESS [FILE.wav] [--quality HQ|SQ|MQ] [--queue-ms 150]
+//   codecblue play ADDRESS [FILE.wav] [--quality HQ|SQ|LQ|0-4] [--queue-ms 150]
 //                                [--media-priority 0]
 //                                Stream a WAV file (or a test tone) in LDAC, then hand the
 //                                headphones back. Ctrl-C stops early and hands them back too.
@@ -39,17 +39,19 @@ func usage() -> Never {
     usage: codecblue version
            codecblue lookup XX:XX:XX:XX:XX:XX
            codecblue probe  XX:XX:XX:XX:XX:XX
-           codecblue play   XX:XX:XX:XX:XX:XX [FILE.wav] [--quality HQ|SQ|MQ] [--queue-ms N]
+           codecblue play   XX:XX:XX:XX:XX:XX [FILE.wav] [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
                             [--media-priority N] [--media-mtu N|0] [--sndbuf-packets N]
                             [--no-hfp] [--no-avrcp] [--low-latency] [--keep-link-quality] [--adapt] [--gain X]
-           codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|MQ] [--queue-ms N]
+           codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
                             (plays the CodecBlue virtual device)
            codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
            codecblue devices                      (the headphones macOS knows about)
            codecblue status                       (ask a running stream what it is doing)
-           codecblue quality HQ|SQ|MQ             (change it while it plays)
+           codecblue quality HQ|SQ|LQ|0-4         (the ceiling, while it plays)
            codecblue adapt   on|off               (let it choose the level itself)
            codecblue cushion 40                   (the cushion, in ms — this is the latency)
+           codecblue levels                       (the whole ladder, and what fits here)
+           codecblue compare                      (this link against the Mac's own AAC)
            codecblue link    XX:XX:XX:XX:XX:XX
            codecblue tone    FILE.wav [SECONDS] [--sweep]  (a constant sine, or a sweep)
            codecblue flood   XX:XX:XX:XX:XX:XX [SECONDS] [BYTES] [--keep-link-quality]
@@ -153,7 +155,7 @@ func link(_ address: String) async throws {
 }
 
 func play(_ address: String, _ options: [String]) async throws {
-    var quality = LDACEncoder.Quality.high
+    var rung = 0
     var file: String?
     var queueDuration = 0.15
     var mediaPriority: Int64 = 0
@@ -169,10 +171,9 @@ func play(_ address: String, _ options: [String]) async throws {
     while let option = rest.popFirst() {
         switch option {
         case "--quality":
-            guard let value = rest.popFirst(),
-                  let q = LDACEncoder.Quality.allCases.first(where: { $0.name == value.uppercased() })
+            guard let value = rest.popFirst(), let parsed = LDACEncoder.rung(from: value)
             else { usage() }
-            quality = q
+            rung = parsed
         case "--queue-ms":
             guard let value = rest.popFirst(), let ms = Double(value), ms >= 20, ms <= 2000 else { usage() }
             queueDuration = ms / 1000
@@ -218,7 +219,14 @@ func play(_ address: String, _ options: [String]) async throws {
     if keepLinkQuality {
         // Must happen before the takeover: once we own the media channel bluetoothd unpublishes
         // the audio device and answers our messages with "No device found for uid".
-        if let uuid = CBDeviceUUID.find(for: address) {
+        //
+        // Two ways of asking, and the second is the true one: `findRegistered` reads the UUID off
+        // the audio device bluetoothd says it has registered *for this address*, while
+        // `find` takes the last `CBDevice` line with A2DP in it, which may belong to another pair
+        // of headphones entirely. The first is kept as a fallback because the registration line
+        // only exists once bluetoothd has published a device, and a pair that has just connected
+        // may not have one yet.
+        if let uuid = CBDeviceUUID.resolve(for: address).best {
             keeper = AudioStreamKeeper(address: address, deviceUUID: uuid, period: 1, log: log)
             keeper?.start()
             log("asking bluetoothd for A2DP Link Quality Mode before taking the link (\(uuid))")
@@ -255,8 +263,8 @@ func play(_ address: String, _ options: [String]) async throws {
         streamer.holdAVRCP = holdAVRCP
         streamerBox.streamer = streamer
         if !streamerBox.interrupted {
-            let configuration = try await streamer.setUp(sampleRate: audio.sampleRate, quality: quality)
-            log("playing in LDAC \(configuration.quality.name)")
+            let configuration = try await streamer.setUp(sampleRate: audio.sampleRate, rung: rung)
+            log("playing in LDAC \(configuration.rungName)")
             let samples = audio.samples
             try await Task.detached(priority: .high) { try streamer.play(samples) }.value
         }
@@ -316,7 +324,7 @@ func pace(_ address: String, seconds: Double, packetSize: Int, rate: Double) asy
     let signaling = try await takeover.grabSignaling()
     let streamer = A2DPStreamer(takeover: takeover, signaling: signaling, log: log)
     box.streamer = streamer
-    _ = try await streamer.setUp(sampleRate: 48000, quality: .mobile)
+    _ = try await streamer.setUp(sampleRate: 48000, rung: 4)
     streamer.pace(seconds: seconds, packetSize: packetSize, packetsPerSecond: rate)
     await streamer.tearDown()
     log("handing the headphones back to macOS")
@@ -330,7 +338,7 @@ func flood(_ address: String, seconds: Double, packetSize: Int, keepLinkQuality:
     // bluetoothd still has the audio device published. Once we own the media channel
     // bluetoothd unpublishes the device and refuses our messages with "No device found".
     var keeper: AudioStreamKeeper?
-    if keepLinkQuality, let uuid = CBDeviceUUID.find(for: address) {
+    if keepLinkQuality, let uuid = CBDeviceUUID.resolve(for: address).best {
         keeper = AudioStreamKeeper(address: address, deviceUUID: uuid, period: 1,
                                    uidSuffix: uidSuffix, log: log)
         keeper?.start()
@@ -345,7 +353,7 @@ func flood(_ address: String, seconds: Double, packetSize: Int, keepLinkQuality:
     let signaling = try await takeover.grabSignaling()
     let streamer = A2DPStreamer(takeover: takeover, signaling: signaling, log: log)
     box.streamer = streamer
-    _ = try await streamer.setUp(sampleRate: 48000, quality: .mobile)
+    _ = try await streamer.setUp(sampleRate: 48000, rung: 4)
     streamer.flood(seconds: seconds, packetSize: packetSize)
     await streamer.tearDown()
     log("handing the headphones back to macOS")
@@ -356,7 +364,7 @@ func flood(_ address: String, seconds: Double, packetSize: Int, keepLinkQuality:
 /// to the headphones. This is the whole point of the driver — any app that selects "CodecBlue"
 /// as its output ends up here.
 func playSystem(_ address: String, options: [String]) async throws {
-    var quality = LDACEncoder.Quality.mobile
+    var rung = 4
     var keepLinkQuality = true
     var adapt = true
     // The cushion is learned, not chosen: PacketQueue.noteStall/relax start it at 80 ms — where a
@@ -382,10 +390,9 @@ func playSystem(_ address: String, options: [String]) async throws {
     while let option = rest.popFirst() {
         switch option {
         case "--quality":
-            guard let value = rest.popFirst(),
-                  let q = LDACEncoder.Quality.allCases.first(where: { $0.name == value.uppercased() })
+            guard let value = rest.popFirst(), let parsed = LDACEncoder.rung(from: value)
             else { usage() }
-            quality = q
+            rung = parsed
         case "--queue-ms":
             guard let value = rest.popFirst(), let ms = Double(value), ms >= 20, ms <= 2000 else { usage() }
             queueDuration = ms / 1000
@@ -432,24 +439,43 @@ func playSystem(_ address: String, options: [String]) async throws {
             + "but nothing is feeding it. Check that this process is running "
             + "(`codecblue agent status`), then play something.")
     }
-    // The volume is applied here, not in the driver: see SystemVolume.
+    // The volume's *curve* lives in the headphones now (see §13.44 of the notes); what is applied
+    // in this process is the mute, as zeros. `SystemVolume` is still read here because it is the
+    // only place that knows the slider position and whether the device is muted.
     let volume = SystemVolume()
     if let volume {
-        // Report both numbers: the slider position and the gain it becomes. They differ by the
-        // perceptual curve, and seeing both is how a wrong curve would be noticed.
-        log(String(format: "volume: slider %.0f%% -> gain %.1f%%%@ (applied before the encoder)",
-                   volume.reported * 100, volume.gain * 100,
-                   volume.isMuted ? " — muted" : ""))
+        // Say where the volume actually goes, because this line used to lie.
+        //
+        // It read `slider 33% -> gain 3.1% (applied before the encoder)`, and that is not what
+        // happens: since §13.44 the curve lives in the headphones and the only thing multiplied
+        // here is the mute (1 or 0). A log that claims an attenuation the code does not perform is
+        // how the double-attenuation bug of §13.43 stayed invisible for an evening — the number
+        // looked plausible in both the broken and the fixed version.
+        log(String(format: "volume: slider %.0f%% goes to the headphones; here only the mute is applied%@",
+                   volume.reported * 100, volume.isMuted ? " (muted: zeros)" : ""))
+        // And what the headphones were actually told. It must be the slider: anything else is the
+        // two-attenuations bug coming back.
+        if let pushed = volume.lastPushed {
+            log(String(format: "volume: the headphones are at %.0f%%", pushed * 100))
+        }
     } else {
         log("volume: the CodecBlue device is not the system output, so there is no volume to read")
     }
 
     var keeper: AudioStreamKeeper?
-    if keepLinkQuality, let uuid = CBDeviceUUID.find(for: address) {
-        keeper = AudioStreamKeeper(address: address, deviceUUID: uuid, period: 1, log: log)
-        keeper?.start()
-        log("asking bluetoothd for A2DP Link Quality Mode before taking the link (\(uuid))")
-        try await Task.sleep(for: .seconds(3))
+    if keepLinkQuality {
+        if let uuid = CBDeviceUUID.resolve(for: address).best {
+            keeper = AudioStreamKeeper(address: address, deviceUUID: uuid, period: 1, log: log)
+            keeper?.start()
+            log("asking bluetoothd for A2DP Link Quality Mode before taking the link (\(uuid))")
+            try await Task.sleep(for: .seconds(3))
+        } else {
+            // Say it, and say what it costs. Without the link quality mode the link carries ~50
+            // kbps instead of ~500, and the listener hears crackle for a reason that is nowhere in
+            // the audio path. This used to be a silent skip.
+            log("cannot find bluetoothd's UUID for this device: link quality mode stays off, "
+                + "so the link will carry ~50 kbps instead of ~500")
+        }
     }
     defer { keeper?.stop() }
 
@@ -464,7 +490,46 @@ func playSystem(_ address: String, options: [String]) async throws {
     }
     interrupt.resume()
 
+    // The keeper needs the UUID, and the UUID is only in bluetoothd's log — which is written when
+    // the headphones connect. `play` (and the agent) start with the headphones *off*, ask macOS to
+    // connect them, and only then does that line exist: measured 2026-11-08, the lookup at t=3.9 s
+    // found nothing, the whole stream ran at `at most 2 packet(s) per drain`, and the log said so
+    // only once, at startup. So the lookup is repeated after the takeover, when the device is
+    // certainly there, and the keeper starts then if it could not start before.
+    func startKeeperIfPossible(because reason: String) {
+        guard keepLinkQuality else { return }
+        if let keeper {
+            // Already running: ask again now rather than do nothing. This is the call that lands
+            // in the window, and the window is what matters.
+            keeper.askAgainNow(because: reason)
+            return
+        }
+        guard let uuid = CBDeviceUUID.resolve(for: address).best else {
+            log("link quality mode: still no UUID for this device (\(reason))")
+            return
+        }
+        keeper = AudioStreamKeeper(address: address, deviceUUID: uuid, period: 1, log: log)
+        keeper?.start()
+        log("asking bluetoothd for A2DP Link Quality Mode (\(reason), \(uuid))")
+    }
+
+    // The window, hooked where it actually opens.
+    //
+    // `grabSignaling` waits for macOS to publish the headphones' audio device and *then* forces a
+    // disconnect and takes the link. The moment it publishes is the only moment bluetoothd has a
+    // `-tacl` device for `StartAudio` to land on, and it lasts until the takeover closes the media
+    // channel — measured 2026-11-08: 721 ms. Asking from anywhere else is asking at the wrong
+    // time, which is what "gracchia tanto" was: 65% of the audio dropped, LQM off.
+    // A box, not a capture: the closure is `@Sendable` and the function is a local one, and the
+    // keeper it needs may not exist yet — its UUID only appears in bluetoothd's log once the
+    // device is published, which is the very moment this fires.
+    let keeperBox = KeeperBox()
+    keeperBox.set { reason in startKeeperIfPossible(because: reason) }
+    takeover.onSystemConnected = { [keeperBox] in
+        keeperBox.ask(because: "macOS has just published the audio device")
+    }
     let signaling = try await takeover.grabSignaling()
+    startKeeperIfPossible(because: "the headphones are connected now")
     let streamer = A2DPStreamer(takeover: takeover, signaling: signaling, log: log)
     streamer.queueDuration = queueDuration
     streamer.queueCeiling = queueDuration + 0.25
@@ -496,12 +561,26 @@ func playSystem(_ address: String, options: [String]) async throws {
             lines.append("end")
             return lines
         case "quality":
-            guard let wanted = command.argument?.uppercased(),
-                  let level = LDACEncoder.Quality.allCases.first(where: { $0.name == wanted })
-            else { return ["error=quality must be HQ, SQ or MQ"] }
-            streamer.requestedQuality = level
-            streamer.adaptBitrate = false
-            return ["ok quality=\(level.name)", "adapt=off"]
+            // A name or a rung: `HQ` / `SQ` / `LQ` for the three Sony named, `0`…`4` for any rung
+            // on the ladder. The two in the middle have no name and are the point of the whole
+            // exercise — 492 kbps is what a 530 kbps link wants, and neither HQ nor SQ is it.
+            guard let text = command.argument, let rung = LDACEncoder.rung(from: text)
+            else { return ["error=quality must be HQ, SQ, LQ or a rung 0…4"] }
+            // The rung is a ceiling, not an instruction to sit there: see `requestedRung`. The
+            // listener asked for HQ because they want the best this link can do, not because they
+            // want 45% of the audio thrown away when it cannot do it.
+            streamer.requestedRung = rung
+            let name = LDACEncoder.name(rung: rung,
+                                        sampleRate: streamer.currentSampleRate ?? 48000)
+            return ["ok quality=\(name)", "ceiling=\(name)", "rung=\(rung)"]
+        case "levels":
+            // What the ladder means on this link. The nominal bitrates are the codec's; the
+            // verdict is the link's, measured. See `QualityLevels`.
+            let status = streamer.status?() ?? [:]
+            let capacity = Double(status["link_kbps"] ?? "") ?? 0
+            let rate = Int(status["sample_rate"] ?? "") ?? 48000
+            return QualityLevels.describe(capacityKbps: capacity, sampleRate: rate)
+                .map { QualityLevels.label($0, capacityKbps: capacity) }
         case "cushion":
             // The cushion is the latency. Changing it while the audio plays is the only way to
             // answer "is 40 ms enough on this link?", which is a question only the listener can
@@ -535,7 +614,15 @@ func playSystem(_ address: String, options: [String]) async throws {
         var out: [String: String] = [:]
         out["ring_frames"] = String(ring.available)
         out["ring_ms"] = String(format: "%.0f", Double(ring.available) / Double(ring.sampleRate) * 1000)
-        out["quality"] = streamer.currentQuality?.name ?? "unknown"
+        // The rung that is playing, by the name Sony gave it where there is one and by its
+        // bitrate where there is not: "492" is a real answer and neither HQ nor SQ.
+        let rate = streamer.currentSampleRate ?? 48000
+        out["quality"] = streamer.currentRung.map {
+            LDACEncoder.name(rung: $0, sampleRate: rate)
+        } ?? "unknown"
+        out["quality_rung"] = streamer.currentRung.map(String.init) ?? "unknown"
+        out["quality_kbps"] = streamer.currentBitrateKbps.map(String.init) ?? "unknown"
+        out["sample_rate"] = String(streamer.currentSampleRate ?? 48000)
         out["adapt"] = streamer.adaptBitrate ? "on" : "off"
         out["battery"] = streamer.batteryPercent.map(String.init) ?? "unknown"
         out["volume"] = volume.map { String(format: "%.0f", $0.reported * 100) } ?? "unknown"
@@ -549,6 +636,20 @@ func playSystem(_ address: String, options: [String]) async throws {
         // moves the other, which is the whole class of bug this area keeps producing.
         out["slider"] = String(format: "%.0f", (volume?.reported ?? 1) * 100)
         out["muted"] = (volume?.isMuted ?? false) ? "yes" : "no"
+        // The link quality mode: the difference between 50 kbps and 500, and until now the only
+        // place it was visible was a log line at startup that nothing updates. The rule is in
+        // `LinkQuality`, where the reasoning and the measurements live.
+        out["link_stalls"] = String(streamer.currentStalls)
+        // What the link carries, which is what decides whether a level is usable at all: HQ asks
+        // 990 and this machine carries ~530, so HQ here means "half the audio thrown away".
+        out["link_kbps"] = String(format: "%.0f", streamer.currentCarriedKbps)
+        // The burst only means something when the socket refused something: with no refusal it is
+        // just "every packet in the window", which was 499 on this Mac and says nothing about the
+        // link. So it is reported only when there was a stall to end it.
+        out["packets_per_drain"] = streamer.currentStalls > 0 ? String(streamer.currentBurst) : "-"
+        out["link_quality"] = LinkQuality.judge(stalls: streamer.currentStalls,
+                                                burst: streamer.currentBurst,
+                                                sentPackets: streamer.currentBurst > 0).rawValue
         out["latency_ms"] = String(format: "%.0f",
                                    (streamer.currentCushion + Double(ring.available) / Double(ring.sampleRate)) * 1000)
         return out
@@ -780,7 +881,7 @@ func playSystem(_ address: String, options: [String]) async throws {
     // resampling at all; asking for 48 when the device runs at 44.1 would convert every sample
     // for no reason. `setUp` treats it as a preference, so a device that cannot take this rate
     // still gets the best it offers.
-    let configuration = try await streamer.setUp(sampleRate: ring.sampleRate, quality: quality)
+    let configuration = try await streamer.setUp(sampleRate: ring.sampleRate, rung: rung)
     // Now the AVRCP channel exists, so the headphones can be told the volume the Mac is at.
     // Without this the two volumes are independent: the slider moves our gain and the headphones
     // keep their own attenuation, which is exactly what was reported.
@@ -804,11 +905,20 @@ func playSystem(_ address: String, options: [String]) async throws {
     streamer.onSkip = { frames in
         ring.discard(Int((Double(frames) * skipScale).rounded()))
     }
+    // Ask for the link quality mode again the instant the stream starts: see `onStreamStarted`.
+    // Without it the first ~14 s of every stream run at ~50 kbps, which is heard as crackle, and
+    // the cause is invisible from here — it is bluetoothd having erased its own audio device.
+    // The keeper may have been created after `setUp` (its UUID only exists once the headphones are
+    // connected), so the closure captures the variable, not the value: `keeper` is a `var` in this
+    // scope and by the time the stream starts it may hold an instance that did not exist here.
+    streamer.onStreamStarted = { [keeper] in
+        keeper?.askAgainNow(because: "once the stream started")
+    }
 
     if !resampler.isIdentity {
         log("resampling \(ring.sampleRate) Hz -> \(configuration.sampleRate) Hz for the encoder")
     }
-    log("playing the system output in LDAC \(configuration.quality.name)")
+    log("playing the system output in LDAC \(configuration.rungName)")
     // The ring is live: there is no end, only the next buffer. The streamer pulls from a closure
     // so that it can keep its own pacing and queue accounting.
     // Report the ring's own health: a skip is an audible click, so it must be visible.
@@ -908,7 +1018,7 @@ func audioprobe(_ address: String) async throws {
         log("what you probably want is `codecblue play --keep-link-quality`, which is the safe path")
         return
     }
-    guard let uuid = CBDeviceUUID.find(for: address) else {
+    guard let uuid = CBDeviceUUID.resolve(for: address).best else {
         log("cannot find bluetoothd's UUID for this device")
         return
     }
@@ -948,6 +1058,31 @@ func release(_ address: String) async throws {
 final class StreamerBox: @unchecked Sendable {
     var streamer: A2DPStreamer?
     var interrupted = false
+}
+
+/// Carries the "ask for the link quality mode now" action into a `@Sendable` callback.
+///
+/// The action is a local function in `playSystem` and the callback is `@Sendable`, so the function
+/// cannot be captured directly. It is also not known when the callback is installed: the keeper
+/// needs bluetoothd's UUID, and that line only exists once the audio device is published — which
+/// is the very moment the callback fires. So the box is filled before the takeover starts and read
+/// when the moment comes.
+final class KeeperBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var action: ((String) -> Void)?
+
+    func set(_ action: @escaping (String) -> Void) {
+        lock.lock()
+        self.action = action
+        lock.unlock()
+    }
+
+    func ask(because reason: String) {
+        lock.lock()
+        let action = self.action
+        lock.unlock()
+        action?(reason)
+    }
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -1051,6 +1186,58 @@ do {
             exit(1)
         }
         print(lines.joined(separator: "\n"))
+    case ("levels", 1):
+        // The whole ladder, in kbps and in a verdict. Five rungs, not three: the two in the middle
+        // have no name and are exactly what a link that carries ~530 kbps needs. Without a stream
+        // there is no measured capacity, and then only the nominal bitrates are printed: a guess
+        // here would be worse than an answer that says what it knows.
+        let status = ControlClient.send("status") ?? []
+        func value(_ key: String) -> String? {
+            status.first { $0.hasPrefix(key + "=") }.map { String($0.dropFirst(key.count + 1)) }
+        }
+        let capacity = Double(value("link_kbps") ?? "") ?? 0
+        let rate = Int(value("sample_rate") ?? "") ?? 48000
+        for level in QualityLevels.describe(capacityKbps: capacity, sampleRate: rate) {
+            print((level.chosen ? "✓ " : "  ") + QualityLevels.label(level, capacityKbps: capacity)
+                  + "  (rung \(level.rung))")
+        }
+    case ("compare", 1):
+        // The question this answers is "how does this compare with the Mac's own AAC?". It cannot
+        // be answered by listening, because the two paths are not in the room at the same time, and
+        // it cannot be answered by copying a bitrate out of a datasheet. bluetoothd prints what it
+        // configured and what the link did, once a second, while *it* streams — so that is read,
+        // and the comparison is made in the only unit both paths share: kbit/s asked of the link.
+        guard let text = BluetoothLog.text(window: "12h"),
+              let session = AACSession.parse(text) else {
+            print("no AAC session in the last 12 hours: play something through the Mac's own "
+                  + "Bluetooth output first, and this will read what macOS asked of the link")
+            exit(0)
+        }
+        for line in session.describe() { print(line) }
+        let status = ControlClient.send("status") ?? []
+        func value(_ key: String) -> String? {
+            status.first { $0.hasPrefix(key + "=") }.map { String($0.dropFirst(key.count + 1)) }
+        }
+        let rate = Int(value("sample_rate") ?? "") ?? 48000
+        let ladder = LDACEncoder.ladder(sampleRate: rate)
+        let floor = ladder.last ?? 330
+        print("")
+        print(session.comparison(floorKbps: floor))
+        if let carried = Double(value("link_kbps") ?? ""), carried > 0 {
+            print(String(format: "this link has carried %.0f kbps: AAC's %.0f fits with room, "
+                         + "LDAC's floor of %d %@", carried, session.kbps, floor,
+                         carried >= Double(floor) ? "fits too" : "does not"))
+        }
+        print("")
+        print("The rest of the difference is not a bitrate:")
+        print("  · macOS owns the ACL link: it keeps the Link Quality Mode on and takes the link")
+        print("    out of sniff itself. This program rents the same link by taking it over, so it")
+        print("    gets the same radio and has to ask for both by hand.")
+        print("  · macOS has adjustBitRateForMac: when the link complains it lowers the AAC")
+        print("    bitrate. libldac's public API stops at 330 kbps, so below that there is nothing")
+        print("    to lower — the audio is dropped instead.")
+        print("  · AAC is VBR: its frames shrink when the signal is simple. LDAC's frame length is")
+        print("    fixed by the packet type, so its bitrate does not follow the music.")
     case ("cushion", 2):
         guard let lines = ControlClient.send("cushion \(arguments[1])") else {
             print("no stream is running (nothing at \(ControlServer.defaultPath))")
@@ -1090,7 +1277,7 @@ func agent(_ action: String, address: String?, extra: [String]) throws {
     switch action {
     case "install":
         guard let address else {
-            log("usage: codecblue agent install <address> [--quality MQ]")
+            log("usage: codecblue agent install <address> [--quality LQ]")
             exit(2)
         }
         // The absolute path of this binary: launchd has no PATH and no working directory.

@@ -71,6 +71,32 @@ public enum LaunchAgent {
         """
     }
 
+    /// The arguments that carry the listener's choices into the stream.
+    ///
+    /// The agent is the only way the stream is ever started in normal use, so a setting that lives
+    /// only in the menu is a setting that is forgotten at the next login — and worse, at the next
+    /// crash, which `KeepAlive` restarts with the command line it was loaded with. The quality and
+    /// the cushion are therefore written into the plist, with the same names the command line uses.
+    ///
+    /// `quality` is omitted when the adapter is on: the level is then the adapter's business, and
+    /// pinning one would silently turn the adapter off (see the `quality` command). When a level
+    /// *is* pinned, `--no-adapt` has to go with it, or the restarted stream would start with the
+    /// adapter on and climb away from the level the listener chose.
+    ///
+    /// Since 2026-11-08 the level is a *ceiling* and the stream settles below it when the link
+    /// cannot carry it, so a pinned level no longer implies `--no-adapt`: the adapter is what
+    /// makes the ceiling safe. `--no-adapt` is written only when the listener turned the adapter
+    /// off on purpose.
+    public static func arguments(quality: String?, adapt: Bool, cushionMilliseconds: Int?) -> [String] {
+        var out: [String] = []
+        if let quality { out += ["--quality", quality] }
+        if !adapt { out += ["--no-adapt"] }
+        if let cushionMilliseconds, cushionMilliseconds > 0 {
+            out += ["--queue-ms", String(cushionMilliseconds)]
+        }
+        return out
+    }
+
     /// XML-escapes a value. The address has colons and the paths have slashes, none of which need
     /// escaping, but an argument could carry `&` or `<` and a plist that will not parse is a
     /// LaunchAgent that silently does nothing.

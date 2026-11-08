@@ -14,6 +14,9 @@ public enum ClassicXPCError: Error, CustomStringConvertible, Equatable {
     case timeout(String)
     case refused(Int)
     case notReady
+    /// bluetoothd said the radio is off. Distinct from `notReady` so that the retry in `start`
+    /// can tell "nobody answered" from "the answer is no".
+    case powerOff
     case unknownDevice(String)
     case malformedReply(String)
 
@@ -23,6 +26,7 @@ public enum ClassicXPCError: Error, CustomStringConvertible, Equatable {
         case let .timeout(what): "bluetoothd did not answer: \(what)"
         case let .refused(code): "refused by bluetoothd or the headphones (result \(code))"
         case .notReady: "Bluetooth is not powered on"
+        case .powerOff: "Bluetooth is switched off"
         case let .unknownDevice(address): "bluetoothd does not know \(address)"
         case let .malformedReply(what): "unexpected reply from bluetoothd: \(what)"
         }
@@ -123,6 +127,10 @@ public final class ClassicXPCSession: @unchecked Sendable {
     private let onQueueKey = DispatchSpecificKey<Bool>()
     private var connection: xpc_connection_t?
     private var ready = false
+    /// Set when bluetoothd has explicitly said the radio is off. A retry is pointless then: the
+    /// answer will be the same for as long as the switch stays off, and three five-second waits
+    /// would turn "Bluetooth is off" into a sixteen-second hang.
+    private var powerOff = false
     private var failure: ClassicXPCError?
     private var readyWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var openWaiters: [UInt16: CheckedContinuation<OpenedChannel, Error>] = [:]
@@ -147,9 +155,37 @@ public final class ClassicXPCSession: @unchecked Sendable {
     // MARK: - Lifecycle
 
     /// Connects and checks in the way IOBluetooth does; returns once Bluetooth is on.
-    public func start(timeout: TimeInterval = 5) async throws {
-        onQueue { openConnection() }
-        try await waitReady(timeout: timeout)
+    ///
+    /// The check-in is retried, and the retry is the whole point.
+    ///
+    /// Measured 2026-11-08: `bluetoothd did not answer: check-in / power state` happened on most
+    /// runs and then recovered on the next attempt, with the same binary and the same arguments.
+    /// The reply arrives on bluetoothd's schedule, and five seconds is not always enough on a
+    /// machine that has just woken up a daemon and a controller — so a single timeout used to end
+    /// a stream that would have worked a second later.
+    ///
+    /// The retry is a *fresh connection*, not a second wait on the same one: a check-in that went
+    /// unanswered has no state worth keeping, and reusing the connection is how a half-open one
+    /// turns into a stream that fails with a different error every time.
+    public func start(timeout: TimeInterval = 5, attempts: Int = 3) async throws {
+        var lastError: Error?
+        for attempt in 1...max(1, attempts) {
+            onQueue { openConnection() }
+            do {
+                try await waitReady(timeout: timeout)
+                return
+            } catch {
+                lastError = error
+                // A silent radio is worth asking again; a radio that said "off" is not.
+                let off = onQueue { powerOff }
+                invalidate()
+                guard attempt < attempts, !off else { break }
+                // Half a second between attempts: long enough for bluetoothd to finish whatever it
+                // was doing, short enough that a stream started by hand does not look hung.
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+        throw lastError ?? ClassicXPCError.timeout("check-in / power state")
     }
 
     public func invalidate() {
@@ -162,6 +198,10 @@ public final class ClassicXPCSession: @unchecked Sendable {
 
     private func openConnection() {
         guard connection == nil else { return }
+        // A fresh connection is a fresh start: the failure that ended the previous one belongs to
+        // it, and keeping it would make the retry above fail instantly with the old error.
+        failure = nil
+        ready = false
         let connection = xpc_connection_create_mach_service(serviceOverride ?? proto.serviceName, queue, 0)
         xpc_connection_set_event_handler(connection) { [weak self] event in self?.handle(event) }
         xpc_connection_resume(connection)
@@ -408,13 +448,30 @@ public final class ClassicXPCSession: @unchecked Sendable {
         switch id {
         case proto.stateChanged:
             guard let args else { return }
-            let on = xpc_dictionary_get_int64(args, XPCKey.state) == proto.statePoweredOn
+            let state = xpc_dictionary_get_int64(args, XPCKey.state)
+            let on = state == proto.statePoweredOn
             if on && !ready {
                 ready = true
+                powerOff = false
                 for waiter in readyWaiters.values { waiter.resume() }
                 readyWaiters.removeAll()
-            } else if !on && ready {
-                ready = false
+            } else if !on {
+                // Only a *settled* "off" ends the wait. `stateChanged` also carries the transient
+                // states of a radio that is turning on (and of one that is turning off), and
+                // treating any of them as "off" made the stream exit with `Bluetooth is switched
+                // off` on a machine whose Bluetooth was on and whose headphones were connected —
+                // measured 2026-11-08, twice, on the first run after a rebuild. The transient
+                // values are not documented anywhere reliable, so the rule is the conservative
+                // one: only the value that means "powered off" fails, everything else waits for
+                // the timeout it was always going to wait for.
+                let settledOff = state == proto.statePoweredOff
+                if settledOff { powerOff = true }
+                if ready { ready = false }
+                guard settledOff else { return }
+                for waiter in readyWaiters.values {
+                    waiter.resume(throwing: ClassicXPCError.powerOff)
+                }
+                readyWaiters.removeAll()
             }
             onPowerChanged?(on)
         case proto.channelConnected:

@@ -7,9 +7,41 @@ public final class LDACEncoder {
     public enum Quality: Int32, Sendable, CaseIterable {
         case high = 0  // HQ: 990 kbps (48/96 kHz), 909 kbps (44.1/88.2 kHz)
         case standard = 1  // SQ: 660 / 606 kbps
-        case mobile = 2  // MQ: 330 / 303 kbps
+        case mobile = 2  // LQ: 330 / 303 kbps
 
-        public var name: String { ["HQ", "SQ", "MQ"][Int(rawValue)] }
+        /// The three-letter code shown to the listener.
+        ///
+        /// Sony calls the bottom level **MQ**, for "Mobile Quality", and it is a bad label in a
+        /// list: M sorts before S, so MQ appears *below* SQ and reads like a third position rather
+        /// than the bottom of one — the listener has to be told what the letters mean before the
+        /// menu makes sense. **LQ** says what it is, and it sorts where it belongs. The name in
+        /// the code stays `mobile`, because that is the level's identity and renaming it would
+        /// churn every call site for a display decision.
+        public var name: String { ["HQ", "SQ", "LQ"][Int(rawValue)] }
+
+        /// The word for a level, for anywhere a listener reads it in full.
+        public var longName: String {
+            switch self {
+            case .high: return "High"
+            case .standard: return "Standard"
+            case .mobile: return "Low"
+            }
+        }
+
+        /// Parses a level from what a person typed or a plist holds.
+        ///
+        /// `MQ` is accepted forever, and not out of politeness: the LaunchAgent's plist is written
+        /// with a level in it, and a plist written before this rename says `MQ`. Refusing it would
+        /// turn a running stream into a usage error at the next login — the kind of breakage that
+        /// looks like the program forgot how to start.
+        public static func parse(_ text: String) -> Quality? {
+            switch text.uppercased() {
+            case "HQ", "HIGH": return .high
+            case "SQ", "STANDARD": return .standard
+            case "LQ", "MQ", "LOW", "MOBILE": return .mobile
+            default: return nil
+            }
+        }
     }
 
     /// Every EQMID this build of libldac accepts, including the two the header does not document.
@@ -32,8 +64,8 @@ public final class LDACEncoder {
             case .hq: return "HQ"
             case .sq: return "SQ"
             case .middle: return "SQ-"
-            case .mq: return "MQ"
-            case .low: return "MQ-"
+            case .mq: return "LQ"
+            case .low: return "LQ-"
             }
         }
 
@@ -126,9 +158,142 @@ public final class LDACEncoder {
     /// Current bitrate in kbps (libldac moves between quality levels gradually).
     public var bitrateKbps: Int { Int(ldacBT_get_bitrate(handle)) }
 
+    /// One step down the five-rung ladder, and one step up.
+    ///
+    /// libldac has **five** EQMIDs, not three: 990 / 660 / 492 / 396 / 330 kbps at 48 kHz. The two
+    /// in the middle are undocumented (`ldacBT_ex.h`: "for internal use only") and are exactly what
+    /// Sony's own ABR controller walks through — see `aEqmidToAbrQualityModeID` in
+    /// `ldacBT_abr.c`, which sorts them as 0, 1, 2, 3, 4 in bitrate order. They are the reason a
+    /// level can be *between* HQ and SQ instead of 330 kbps away from it, which is the whole
+    /// difference between three fixed steps and a rate that follows the link.
+    ///
+    /// `ldacBT_alter_eqmid_priority` refuses to go below LQ and above HQ, so the ends are safe:
+    /// stepping down from the floor returns -1 and changes nothing.
+    @discardableResult
+    public func stepDown() -> Bool {
+        ldacBT_alter_eqmid_priority(handle, LDACBT_EQMID_INC_CONNECTION) == 0
+    }
+
+    @discardableResult
+    public func stepUp() -> Bool {
+        ldacBT_alter_eqmid_priority(handle, LDACBT_EQMID_INC_QUALITY) == 0
+    }
+
+    /// The rung a name or a number refers to, from what a person typed or a plist holds.
+    ///
+    /// Two spellings, because there are two things to say. `HQ` / `SQ` / `LQ` (and `MQ`, forever)
+    /// name the three rungs Sony named; `0`…`4` name any rung on the ladder, including the two in
+    /// the middle that have no name and are the reason a rate can follow the link instead of
+    /// jumping 330 kbps at a time. `--quality 2` is a legitimate request: it is 492 kbps.
+    public static func rung(from text: String) -> Int? {
+        if let number = Int(text) { return (0...4).contains(number) ? number : nil }
+        guard let quality = Quality.parse(text) else { return nil }
+        switch quality {
+        case .high: return 0
+        case .standard: return 1
+        case .mobile: return 4
+        }
+    }
+
+    /// The EQMID behind a rung. The two orders are not the same, and that is the trap.
+    ///
+    /// The ladder is in bitrate order — 990, 660, 492, 396, 330 — while the EQMIDs are in Sony's
+    /// own order, where the bottom level is 2 and the two undocumented ones are 3 and 4:
+    ///
+    ///     rung 0 → EQMID 0 (990)    rung 3 → EQMID 4 (396)
+    ///     rung 1 → EQMID 1 (660)    rung 4 → EQMID 2 (330, "MQ")
+    ///     rung 2 → EQMID 3 (492)
+    ///
+    /// Using `Quality(rawValue: rung)` instead reads rung 2 as "MQ" and rung 4 as nothing, which
+    /// is how a menu came to offer 330 kbps twice and 492 not at all.
+    public static func eqmid(forRung rung: Int) -> Int32? {
+        switch min(4, max(0, rung)) {
+        case 0: return 0
+        case 1: return 1
+        case 2: return 3
+        case 3: return 4
+        default: return 2
+        }
+    }
+
+    /// What to call a rung. The three Sony named get their code; the two it did not get their
+    /// bitrate, because that is the only thing that distinguishes them and it is the thing that
+    /// matters when the question is "does this fit my link?".
+    public static func name(rung: Int, sampleRate: Int = 48000) -> String {
+        switch rung {
+        case 0: return "HQ"
+        case 1: return "SQ"
+        case 4: return "LQ"
+        default:
+            let ladder = ladder(sampleRate: sampleRate)
+            return rung < ladder.count ? "\(ladder[rung])" : "?\(rung)"
+        }
+    }
+
+    /// The five rungs, highest first, as bitrates at the rate in use. Read from the encoder rather
+    /// than from a table, so a rate change cannot make the ladder lie.
+    ///
+    /// Each step is followed by one encoded frame, and that is not padding: `ldacBT_get_bitrate`
+    /// returns the bitrate of the *last frame encoded*, and `stepDown` only moves the target. A
+    /// ladder read without encoding reports 990 five times — measured 2026-11-08, which is how this
+    /// comment got written.
+    public static func ladder(sampleRate: Int) -> [Int] {
+        // `deinit` closes and frees the handle; there is nothing to release by hand.
+        guard let probe = try? LDACEncoder(sampleRate: sampleRate, level: .hq, mtu: 679) else {
+            return []
+        }
+        let silence = [Float](repeating: 0, count: framesPerCall * 2)
+        // Eight frames, not one: the frame length moves in steps (`ldacBT_encode`, "update
+        // frame_length if needed"), so a single frame reports a value in transit — measured
+        // 2026-11-08: one frame per step gave 990, 495, 492, 396, 315, where 495 and 315 are
+        // half-way houses between two rungs.
+        func settle() -> Int? {
+            for _ in 0..<8 { silence.withUnsafeBufferPointer { _ = try? probe.encode($0) } }
+            return probe.bitrateKbps
+        }
+        var out = [settle() ?? probe.bitrateKbps]
+        for _ in 0..<4 {
+            guard probe.stepDown() else { break }
+            out.append(settle() ?? probe.bitrateKbps)
+        }
+        return out
+    }
+
     public var quality: Quality {
         get { Quality(rawValue: ldacBT_get_eqmid(handle)) ?? .high }
         set { _ = ldacBT_set_eqmid(handle, newValue.rawValue) }
+    }
+
+    /// The rung the encoder is on, 0 (990 kbps) to 4 (330 kbps).
+    ///
+    /// It is not `quality`: two of the five rungs have no `Quality` case, because Sony only named
+    /// three of them. Reading the ladder as a number is what makes "the best this link carries"
+    /// expressible — 492 kbps is a real answer and neither "HQ" nor "SQ".
+    public var rung: Int {
+        let eqmid = ldacBT_get_eqmid(handle)
+        switch Quality(rawValue: eqmid) {
+        case .high: return 0
+        case .standard: return 1
+        case .mobile: return 4
+        case nil: return eqmid == 3 ? 2 : 3
+        }
+    }
+
+    /// Moves to a rung, by stepping: `ldacBT_set_eqmid` refuses the two undocumented values, and
+    /// stepping is also how the encoder keeps its frame length consistent with the packet type.
+    ///
+    /// The `switch` above is exhaustive on purpose, and it is not a lookup table: `Quality` has
+    /// three cases and the ladder has five rungs, so the two unnamed ones are identified by their
+    /// EQMID — 3 and 4 — which is exactly how `ldacBT_ex.h` defines them.
+    public func move(toRung target: Int) {
+        let target = min(4, max(0, target))
+        // A bounded number of steps: the ladder has five rungs, so four moves is the longest
+        // possible journey and a loop that cannot spin.
+        for _ in 0..<4 {
+            let now = rung
+            if now == target { return }
+            if now < target { guard stepDown() else { return } } else { guard stepUp() else { return } }
+        }
     }
 
     /// Encodes exactly `framesPerCall` stereo frames (pass nil to flush at the end).

@@ -128,8 +128,8 @@ func deviceUUIDTests() {
         Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, BDA <private>, \
         CnS 0x800019 < HFP AVRCP A2DP ACL >
         """
-        check(CBDeviceUUID.parse(log) == "4379D275-655C-EEB8-BB72-643BF2534BE0",
-              "\(CBDeviceUUID.parse(log) ?? "nil")")
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP == "4379D275-655C-EEB8-BB72-643BF2534BE0",
+              "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP ?? "nil")")
     }
 
     test("a device without A2DP is not the one we want") {
@@ -137,7 +137,7 @@ func deviceUUIDTests() {
         Device found: CBDevice 11111111-2222-3333-4444-555555555555, BDA <private>, \
         CnS 0x800000 < ACL >
         """
-        check(CBDeviceUUID.parse(log) == nil)
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP == nil)
     }
 
     test("the last mention wins, so a reconnect is followed") {
@@ -145,12 +145,68 @@ func deviceUUIDTests() {
         Device found: CBDevice AAAAAAAA-0000-0000-0000-000000000001, CnS 0x19 < A2DP >
         Device found: CBDevice BBBBBBBB-0000-0000-0000-000000000002, CnS 0x19 < A2DP >
         """
-        check(CBDeviceUUID.parse(log) == "BBBBBBBB-0000-0000-0000-000000000002")
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP == "BBBBBBBB-0000-0000-0000-000000000002")
     }
 
     test("a line that only looks like one is rejected") {
-        check(CBDeviceUUID.parse("CBDevice not-a-uuid A2DP") == nil)
-        check(CBDeviceUUID.parse("") == nil)
+        check(CBDeviceUUID.parse("CBDevice not-a-uuid A2DP", address: "40:DC:A5:0E:14:48").anyA2DP == nil)
+        check(CBDeviceUUID.parse("", address: "40:DC:A5:0E:14:48").anyA2DP == nil)
+    }
+
+    test("the UUID comes from the audio device registered for this address") {
+        // The shape of the real log, measured 2026-11-08: the `CBDevice` line carries the UUID and
+        // redacts the address; the `Register audio device` line carries the address and no UUID.
+        // Neither alone is enough, which is why the two are read together.
+        let log = """
+        16:14:12.902 [CBDaemonServer] Monitor Device Found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, \
+        BDA <private>, CnS 0x800000 < ACL >, SupS 0x200019 < HFP AVRCP A2DP SerialPort >
+        16:14:12.254 [Server.Audio] Register audio device 40:DC:A5:0E:14:48-tacl
+        """
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
+              == "4379D275-655C-EEB8-BB72-643BF2534BE0",
+              "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered ?? "nil")")
+    }
+
+    test("a device bluetoothd has erased is not registered, whatever the UUID") {
+        let log = """
+        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+        Register audio device 40:DC:A5:0E:14:48-tacl
+        Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
+        """
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered == nil)
+    }
+
+    test("a re-registration is followed") {
+        let log = """
+        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+        Register audio device 40:DC:A5:0E:14:48-tacl
+        Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
+        Register audio device 40:DC:A5:0E:14:48-tacl
+        """
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
+              == "4379D275-655C-EEB8-BB72-643BF2534BE0")
+    }
+
+    test("another device's UUID is not mistaken for ours") {
+        // The trap this test exists for: bluetoothd prints a CBDevice line for every phone that
+        // advertises nearby, and the last one in the window is not the headphones.
+        let log = """
+        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+        Register audio device 40:DC:A5:0E:14:48-tacl
+        Identities resolve added: CBDevice B1A311A0-867B-9E35-4619-0E6682B47503, BLEAdvertisementData
+        Identities resolve added: CBDevice F2BEEF75-CDB1-CB5B-11FA-60FD91117744, AirDrop
+        """
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
+              == "4379D275-655C-EEB8-BB72-643BF2534BE0",
+              "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered ?? "nil")")
+    }
+
+    test("an address that is only a substring does not match") {
+        let log = """
+        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+        Register audio device AC:BD:70:5C:06:1C-tacl
+        """
+        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered == nil)
     }
 
     test("the keeper's message always carries the arguments bluetoothd releases") {
@@ -168,132 +224,141 @@ func deviceUUIDTests() {
 }
 
 /// The adapter exists to stop the stream from oscillating: down when the link complains,
-/// up only after it has been clean for a while.
+/// up only after it has been clean for a while. It works on rungs, not on names: the ladder has
+/// five of them (990 / 660 / 492 / 396 / 330) and only three have a name.
 func bitrateAdapterTests() {
-    let quality = LDACEncoder.Quality.self
-
-    test("a clean window does not change the level on its own") {
+    test("a clean window does not change the rung on its own") {
         var adapter = BitrateAdapter(upAfter: 3, minimumInterval: 0)
-        check(adapter.decide(current: .high, dropped: 0, queueFill: 0.1) == .hold)
+        check(adapter.decide(current: 0, dropped: 0, queueFill: 0.1) == .hold)
     }
 
     test("dropped audio steps down at once") {
         var adapter = BitrateAdapter(minimumInterval: 0)
-        check(adapter.decide(current: .high, dropped: 0.5, queueFill: 0.1) == .down(.standard))
-        check(adapter.decide(current: .standard, dropped: 0.5, queueFill: 0.1) == .down(.mobile))
+        check(adapter.decide(current: 0, dropped: 0.5, queueFill: 0.1) == .down(1))
+        check(adapter.decide(current: 1, dropped: 0.5, queueFill: 0.1) == .down(2))
+        // The middle rungs are rungs like any other: 660 → 492 is a step, not a jump to 330.
+        check(adapter.decide(current: 2, dropped: 0.5, queueFill: 0.1) == .down(3))
     }
 
     test("a queue at its ceiling steps down before anything is dropped") {
         var adapter = BitrateAdapter(dropLimit: 0.02, queueLimit: 0.75, minimumInterval: 0)
-        check(adapter.decide(current: .high, dropped: 0, queueFill: 0.9) == .down(.standard))
+        check(adapter.decide(current: 0, dropped: 0, queueFill: 0.9) == .down(1))
     }
 
-    test("it never steps below MQ or above HQ") {
+    test("it never steps below the bottom rung or above the top") {
         var adapter = BitrateAdapter(minimumInterval: 0)
-        check(adapter.decide(current: .mobile, dropped: 0.9, queueFill: 0.9) == .hold,
-              "MQ is the bottom")
+        check(adapter.decide(current: 4, dropped: 0.9, queueFill: 0.9) == .hold,
+              "330 kbps is the bottom")
         var up = BitrateAdapter(upAfter: 1, minimumInterval: 0)
-        _ = up.decide(current: .high, dropped: 0, queueFill: 0)
-        check(up.decide(current: .high, dropped: 0, queueFill: 0) == .hold, "HQ is the top")
+        _ = up.decide(current: 0, dropped: 0, queueFill: 0)
+        check(up.decide(current: 0, dropped: 0, queueFill: 0) == .hold, "990 kbps is the top")
     }
 
     test("it steps up only after the link has been clean for a while") {
         var adapter = BitrateAdapter(upAfter: 3, minimumInterval: 0)
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .hold)
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .hold)
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .up(.standard))
+        check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold)
+        check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold)
+        check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .up(3))
     }
 
     test("one bad window resets the clean count") {
         var adapter = BitrateAdapter(upAfter: 2, minimumInterval: 0)
-        _ = adapter.decide(current: .mobile, dropped: 0, queueFill: 0)
-        _ = adapter.decide(current: .mobile, dropped: 0.5, queueFill: 0)  // but at the bottom
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .hold,
+        _ = adapter.decide(current: 4, dropped: 0, queueFill: 0)
+        _ = adapter.decide(current: 4, dropped: 0.5, queueFill: 0)  // but at the bottom
+        check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold,
               "the count started again")
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .up(.standard))
+        check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .up(3))
     }
 
     test("it does not change again inside the minimum interval") {
         var adapter = BitrateAdapter(minimumInterval: 60)
-        check(adapter.decide(current: .high, dropped: 0.9, queueFill: 0) == .down(.standard))
-        check(adapter.decide(current: .standard, dropped: 0.9, queueFill: 0) == .hold,
+        check(adapter.decide(current: 0, dropped: 0.9, queueFill: 0) == .down(1))
+        check(adapter.decide(current: 1, dropped: 0.9, queueFill: 0) == .hold,
               "too soon to move again")
     }
 
-    test("the ladder is HQ, SQ, MQ and stops at both ends") {
-        check(BitrateAdapter.lower(.high) == .standard)
-        check(BitrateAdapter.lower(.standard) == .mobile)
-        check(BitrateAdapter.lower(.mobile) == nil)
-        check(BitrateAdapter.higher(.mobile) == .standard)
-        check(BitrateAdapter.higher(.high) == nil)
+    test("the rung that fits is chosen from the measured capacity, not from the names") {
+        // The measurement this exists for: this link carries ~530 kbps, and none of the three
+        // named levels fits it — 660 is too much, 330 leaves half the bitrate on the table.
+        // 492 (rung 2) is the answer, and it has no name.
+        check(BitrateAdapter.fitRung(capacityKbps: 530) == 3,
+              "\(BitrateAdapter.fitRung(capacityKbps: 530))")
+        check(BitrateAdapter.fitRung(capacityKbps: 1300) == 0)
+        check(BitrateAdapter.fitRung(capacityKbps: 900) == 1, "765 of budget takes 660")
+        check(BitrateAdapter.fitRung(capacityKbps: 700) == 2, "595 of budget takes 492")
+        check(BitrateAdapter.fitRung(capacityKbps: 560) == 3, "476 of budget takes 396, not 492")
+        check(BitrateAdapter.fitRung(capacityKbps: 400) == 4, "340 of budget takes only 330")
+        // Nothing fits at all: the bottom is still the answer, because the alternative is silence.
+        check(BitrateAdapter.fitRung(capacityKbps: 100) == 4)
+        // And the ladder is read from the encoder, so a rate change changes the answer.
+        check(BitrateAdapter.fitRung(capacityKbps: 700, sampleRate: 44100) == 2)
     }
 }
 
-/// The first live run climbed back to SQ four seconds after SQ had failed, and the listener
-/// heard the same glitch again. A level that failed is not retried at once.
+/// The first live run climbed back to 660 four seconds after 660 had failed, and the listener
+/// heard the same glitch again. A rung that failed is not retried at once.
 func bitrateBackoffTests() {
-    test("a level that failed is not climbed back into at once") {
+    test("a rung that failed is not climbed back into at once") {
         var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 60, upDwell: 0)
-        check(adapter.decide(current: .standard, dropped: 0.4, queueFill: 0.1) == .down(.mobile))
-        // Clean windows at MQ: it wants to go up, but SQ is blocked.
+        check(adapter.decide(current: 1, dropped: 0.4, queueFill: 0.1) == .down(2))
+        // Clean windows at 330: it wants to go up, but 660 is blocked.
         for _ in 0..<5 {
-            check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .hold,
-                  "SQ failed a moment ago")
+            check(adapter.decide(current: 2, dropped: 0, queueFill: 0) == .hold,
+                  "660 failed a moment ago")
         }
     }
 
-    test("the wait doubles each time the same level fails") {
+    test("the wait doubles each time the same rung fails") {
         var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 10, upDwell: 0)
         let start = Date()
-        _ = adapter.decide(current: .standard, dropped: 0.4, queueFill: 0, now: start)
+        _ = adapter.decide(current: 1, dropped: 0.4, queueFill: 0, now: start)
         // Blocked for 10 s: at 11 s it may try again.
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(11)) == .up(.standard))
+        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
+                             now: start.addingTimeInterval(11)) == .up(1))
         // Fail again: now blocked for 20 s.
-        _ = adapter.decide(current: .standard, dropped: 0.4, queueFill: 0,
+        _ = adapter.decide(current: 1, dropped: 0.4, queueFill: 0,
                            now: start.addingTimeInterval(12))
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0,
+        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
                              now: start.addingTimeInterval(20)) == .hold, "still blocked")
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(33)) == .up(.standard), "wait doubled")
+        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
+                             now: start.addingTimeInterval(33)) == .up(1), "wait doubled")
     }
 
-    test("a level that never failed is still reachable") {
+    test("a rung that never failed is still reachable") {
         var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 60, upDwell: 0)
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .up(.standard))
+        check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .up(3))
     }
 }
 
 /// Combining the two fixes: the ceiling stops the adapter from starting too high, and the short
-/// opening windows let it find the right level in half a second instead of four.
+/// opening windows let it find the right rung in half a second instead of four.
 func bitrateCeilingTests() {
     test("the ceiling is never climbed above") {
-        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, ceiling: .mobile, upDwell: 0)
+        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, ceilingRung: 4, upDwell: 0)
         for _ in 0..<5 {
-            check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .hold,
-                  "MQ is the ceiling")
+            check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold,
+                  "330 kbps is the ceiling")
         }
     }
 
     test("a higher ceiling is still reachable") {
-        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, ceiling: .standard, upDwell: 0)
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0) == .up(.standard))
-        check(adapter.decide(current: .standard, dropped: 0, queueFill: 0) == .hold,
-              "SQ is the ceiling here")
+        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, ceilingRung: 1, upDwell: 0)
+        check(adapter.decide(current: 2, dropped: 0, queueFill: 0) == .up(1))
+        check(adapter.decide(current: 1, dropped: 0, queueFill: 0) == .hold,
+              "660 kbps is the ceiling here")
     }
 
     test("probing up needs a long clean stretch, not just a few windows") {
-        // backoff 0: this test is about the dwell, not about the block on a failed level.
-        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 0, ceiling: .high,
+        // backoff 0: this test is about the dwell, not about the block on a failed rung.
+        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 0, ceilingRung: 0,
                                      upDwell: 20)
         let start = Date()
-        // Start at SQ and fail: that records a change, so the dwell counts from here.
-        check(adapter.decide(current: .standard, dropped: 0.5, queueFill: 0, now: start)
-              == .down(.mobile))
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0,
+        // Start at 660 and fail: that records a change, so the dwell counts from here.
+        check(adapter.decide(current: 1, dropped: 0.5, queueFill: 0, now: start) == .down(2))
+        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
                              now: start.addingTimeInterval(5)) == .hold, "only 5 s clean")
-        check(adapter.decide(current: .mobile, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(25)) == .up(.standard), "20 s clean")
+        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
+                             now: start.addingTimeInterval(25)) == .up(1), "20 s clean")
     }
 }
 
@@ -793,6 +858,197 @@ func launchAgentTests() {
         check(plist.contains("<key>RunAtLoad</key>"))
         check(plist.contains("<key>KeepAlive</key>"))
         check(plist.contains("<string>\(LaunchAgent.label)</string>"))
+    }
+
+    test("the listener's choices are written into the agent, and not the adapter's") {
+        // The agent is restarted by launchd after every crash and every login: a setting that is
+        // not in the plist is a setting that quietly reverts.
+        //
+        // Since the level became a *ceiling* (2026-11-08), a pinned level no longer turns the
+        // adapter off: the adapter is what keeps the stream below the ceiling when the link
+        // cannot carry it, and that combination is the one that is safe to remember.
+        check(LaunchAgent.arguments(quality: "HQ", adapt: true, cushionMilliseconds: 40)
+              == ["--quality", "HQ", "--queue-ms", "40"],
+              "\(LaunchAgent.arguments(quality: "HQ", adapt: true, cushionMilliseconds: 40))")
+        // The adapter off on purpose is remembered too, and it is the only thing that writes
+        // `--no-adapt`.
+        check(LaunchAgent.arguments(quality: "HQ", adapt: false, cushionMilliseconds: 60)
+              == ["--quality", "HQ", "--no-adapt", "--queue-ms", "60"])
+        check(LaunchAgent.arguments(quality: nil, adapt: true, cushionMilliseconds: nil).isEmpty)
+        check(LaunchAgent.arguments(quality: nil, adapt: false, cushionMilliseconds: nil)
+              == ["--no-adapt"])
+    }
+
+    test("a rung the link cannot carry is not a preference, it is a fault") {
+        // Measured 2026-11-08, FreeBuds 5, this Mac: HQ asks 990 kbps, the link carries ~530, and
+        // 45% of the audio is thrown away — "inascoltabile". SQ asks 660 and drops 24%: still too
+        // high. 330 drops nothing but leaves half the link unused. The answer is 492, which has no
+        // name at all.
+        check(BitrateAdapter.fitRung(capacityKbps: 530) == 3,
+              "\(BitrateAdapter.fitRung(capacityKbps: 530))")
+        // 700 carried is 595 of budget, and 595 takes 492 but not 660. The headroom is not
+        // decoration: a rung that exactly fills the link is the one that starts stalling.
+        check(BitrateAdapter.fitRung(capacityKbps: 700) == 2)
+        // 800 carried is 680 of budget, which does take 660.
+        check(BitrateAdapter.fitRung(capacityKbps: 800) == 1)
+        // 900 carried is 765, and 765 is not 990: still 660. Only a link with real room for 990
+        // gets it.
+        check(BitrateAdapter.fitRung(capacityKbps: 900) == 1)
+        check(BitrateAdapter.fitRung(capacityKbps: 1300) == 0)
+        // A link slower than the bottom rung still gets the bottom rung: the alternative is
+        // silence.
+        check(BitrateAdapter.fitRung(capacityKbps: 100) == 4)
+        // At 44.1 kHz the ladder is 909 / 606 / 452 / 363 / 303, and the rule uses the encoder's
+        // own numbers, so the answer changes with the rate: 1100 × 0.85 = 935 takes 909.
+        check(BitrateAdapter.fitRung(capacityKbps: 1100, sampleRate: 44100) == 0)
+    }
+
+    test("a rung the stream had to abandon is not climbed back into") {
+        // The settle rule jumps straight to the rung the link can carry, which is not a step the
+        // adapter took — so the adapter has to be told, or it walks back up as soon as the link has
+        // been clean for `upDwell`. Measured 2026-11-08: HQ settled on 330, then went back to 660,
+        // dropped 12%, settled again, and repeated for as long as the stream ran.
+        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, upDwell: 0)
+        adapter.noteTooHigh(0)
+        // One rung up from 330 is 396, which was not abandoned: it is allowed.
+        check(adapter.decide(current: 4, dropped: 0, queueFill: 0.1) == .up(3),
+              "\(adapter.decide(current: 4, dropped: 0, queueFill: 0.1))")
+        // And the abandoned rung stays abandoned: a clean stretch does not make 990 fit a link
+        // that has already shown it does not.
+        var blocked = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 600, upDwell: 0)
+        blocked.noteTooHigh(0)
+        var rung = 4
+        for _ in 0..<3 {
+            if case let .up(next) = blocked.decide(current: rung, dropped: 0, queueFill: 0.1) {
+                rung = next
+            }
+        }
+        check(rung == 1, "it may climb to 660, not to 990: \(rung)")
+        check(blocked.decide(current: 1, dropped: 0, queueFill: 0.1) == .hold,
+              "\(blocked.decide(current: 1, dropped: 0, queueFill: 0.1))")
+    }
+
+    test("the five ABR steps are reachable, and they are the ones between the three names") {
+        // libldac has five EQMIDs, not three: 990 / 660 / 492 / 396 / 330 at 48 kHz. The two in
+        // the middle are undocumented (`ldacBT_ex.h`, "for internal use only") and are what Sony's
+        // own ABR controller walks through. They are the reason a level can be *between* HQ and
+        // SQ instead of 330 kbps away from it.
+        // `get_bitrate` reports the last frame encoded, so the ladder is read by encoding one
+        // frame per step — that is `LDACEncoder.ladder`, and this test holds it still.
+        check(LDACEncoder.ladder(sampleRate: 48000) == [990, 660, 492, 396, 330],
+              "\(LDACEncoder.ladder(sampleRate: 48000))")
+        // At 44.1 kHz the same five rungs are 909 / 606 / 452 / 363 / 303 — 363 and not 364,
+        // because the frame length is a whole number of bytes and the bitrate is derived from it.
+        check(LDACEncoder.ladder(sampleRate: 44100) == [909, 606, 452, 363, 303],
+              "\(LDACEncoder.ladder(sampleRate: 44100))")
+        // The floor is the floor: stepping down from LQ is refused, not wrapped to 990.
+        let encoder = try! LDACEncoder(sampleRate: 48000, level: .mq, mtu: 679)
+        check(encoder.stepDown() == false, "the ladder does not wrap")
+        check(encoder.stepUp() == true)
+        // Rungs are numbers, and moving to one is bounded: four moves covers the whole ladder.
+        check(encoder.rung == 3, "\(encoder.rung) — one step up from LQ is rung 3, not 4")
+        encoder.move(toRung: 0)
+        check(encoder.rung == 0, "\(encoder.rung)")
+        encoder.move(toRung: 2)
+        check(encoder.rung == 2, "\(encoder.rung)")
+        encoder.move(toRung: 9)
+        check(encoder.rung == 4, "a target past the floor clamps to it, \(encoder.rung)")
+    }
+
+    test("the bottom level is called LQ, and MQ still opens the door") {
+        // Sony calls it MQ, for "Mobile Quality". In a list of three that is a trap: M sorts
+        // before S, so MQ appears *below* SQ and reads like a third position rather than the
+        // bottom of one. LQ says what it is and sorts where it belongs.
+        check(LDACEncoder.Quality.mobile.name == "LQ")
+        check(LDACEncoder.Quality.mobile.longName == "Low")
+        // And MQ keeps working forever, because the LaunchAgent's plist has a level written into
+        // it: a plist written before the rename says MQ, and refusing it would turn a running
+        // stream into a usage error at the next login.
+        check(LDACEncoder.Quality.parse("MQ") == .mobile, "the old name")
+        check(LDACEncoder.Quality.parse("mq") == .mobile, "in any case")
+        check(LDACEncoder.Quality.parse("LQ") == .mobile)
+        check(LDACEncoder.Quality.parse("Low") == .mobile)
+        check(LDACEncoder.Quality.parse("HQ") == .high)
+        check(LDACEncoder.Quality.parse("SQ") == .standard)
+        check(LDACEncoder.Quality.parse("nonsense") == nil)
+    }
+
+    test("the menu lists the whole ladder, and ticks the rung this link can carry") {
+        // Five rungs, not three: the two in the middle are what a 530 kbps link needs, and the
+        // menu has to be able to offer them or the stream has nothing to settle on.
+        let levels = QualityLevels.describe(capacityKbps: 530)
+        check(levels.map(\.rung) == [0, 1, 2, 3, 4], "\(levels.map(\.rung))")
+        check(levels.map(\.nominalKbps) == [990, 660, 492, 396, 330],
+              "\(levels.map(\.nominalKbps))")
+        // The named rungs keep their names; the unnamed ones are identified by their bitrate.
+        check(levels.map(\.name) == ["HQ", "SQ", "492", "396", "LQ"], "\(levels.map(\.name))")
+        check(levels.map(\.longName) == ["High", "Standard", "492 kbps", "396 kbps", "Low"])
+        // 530 carried is 450 of budget: 396 and 330 fit, 492 does not.
+        check(levels.map(\.fits) == [false, false, false, true, true],
+              "\(levels.map(\.fits))")
+        // And the tick is on the highest rung that fits — 396, not 330, and not 492.
+        check(levels.filter(\.chosen).map(\.rung) == [3], "\(levels.filter(\.chosen).map(\.rung))")
+        // A link that carries nothing yet claims nothing: a menu that guesses is worse than one
+        // that says it does not know, and it ticks nothing.
+        let unmeasured = QualityLevels.describe(capacityKbps: 0)
+        check(unmeasured.allSatisfy { !$0.fits })
+        check(unmeasured.allSatisfy { !$0.chosen })
+        // A ceiling above what the link carries says what it will actually give: the rung that
+        // fits. "990 kbps · too much for this link" is true and useless; "here 396 kbps" is the
+        // same fact and answers the question the listener is asking.
+        check(QualityLevels.menuLabel(levels[0], capacityKbps: 530)
+              == "High · 990 kbps · here 396 kbps",
+              "\(QualityLevels.menuLabel(levels[0], capacityKbps: 530))")
+        check(QualityLevels.menuLabel(levels[4], capacityKbps: 530) == "Low · 330 kbps")
+        check(QualityLevels.menuLabel(levels[3], capacityKbps: 530) == "✓ 396 kbps",
+              "\(QualityLevels.menuLabel(levels[3], capacityKbps: 530))")
+        // A ceiling *below* what fits is honoured: asking for Low on a fast link gives Low, not the
+        // best the link could do. A ceiling is a limit, and a limit the program ignores is not a
+        // setting.
+        check(QualityLevels.wouldUse(levels[4], capacityKbps: 1300) == 330,
+              "\(QualityLevels.wouldUse(levels[4], capacityKbps: 1300) ?? -1)")
+        check(QualityLevels.wouldUse(levels[0], capacityKbps: 1300) == 990)
+        check(QualityLevels.wouldUse(levels[0], capacityKbps: 530) == 396)
+        // Nothing measured yet: no claim, and the label falls back to the nominal bitrate.
+        check(QualityLevels.wouldUse(levels[0], capacityKbps: 0) == nil)
+        check(QualityLevels.menuLabel(levels[0], capacityKbps: 0) == "High · 990 kbps")
+        // The bitrates come from the encoder, so the rate changes them.
+        check(QualityLevels.describe(capacityKbps: 530, sampleRate: 44100).map(\.nominalKbps)
+              == [909, 606, 452, 363, 303])
+    }
+
+    test("a rung can be named or numbered, and the number reaches the unnamed ones") {
+        // `HQ` / `SQ` / `LQ` are what a person types; `0`…`4` are what the ladder actually has.
+        // Both have to work, because the two middle rungs have no name to type.
+        check(LDACEncoder.rung(from: "HQ") == 0)
+        check(LDACEncoder.rung(from: "SQ") == 1)
+        check(LDACEncoder.rung(from: "LQ") == 4)
+        check(LDACEncoder.rung(from: "MQ") == 4, "the old name, forever")
+        check(LDACEncoder.rung(from: "0") == 0)
+        check(LDACEncoder.rung(from: "2") == 2)
+        check(LDACEncoder.rung(from: "4") == 4)
+        check(LDACEncoder.rung(from: "5") == nil, "there is no sixth rung")
+        check(LDACEncoder.rung(from: "-1") == nil)
+        check(LDACEncoder.rung(from: "nonsense") == nil)
+        // And a rung can be named back, which is what a log line and the status need.
+        check(LDACEncoder.name(rung: 0) == "HQ")
+        check(LDACEncoder.name(rung: 2) == "492")
+        check(LDACEncoder.name(rung: 4) == "LQ")
+        check(LDACEncoder.name(rung: 3, sampleRate: 44100) == "363")
+    }
+
+    test("the link quality mode is judged from the socket, not from bluetoothd's log") {
+        // The measurements this rule is built on, 2026-11-08:
+        //   LQM off, 336 kbps asked: 2 packets per drain, 29% dropped, socket full in every window.
+        //   LQM on,  336 kbps asked: no refusal at all, 73 windows in a row, 99.89% of real time.
+        check(LinkQuality.judge(stalls: 88, burst: 2, sentPackets: true) == .off,
+              "\(LinkQuality.judge(stalls: 88, burst: 2, sentPackets: true))")
+        check(LinkQuality.judge(stalls: 0, burst: 499, sentPackets: true) == .on)
+        // A refusal with a wide burst is still on: the ceiling was above what was asked, and the
+        // refusal was the link, not the mode.
+        check(LinkQuality.judge(stalls: 3, burst: 62, sentPackets: true) == .on)
+        // Nothing sent yet is not "off": saying so would accuse the link before it was used.
+        check(LinkQuality.judge(stalls: 0, burst: 0, sentPackets: false) == .unknown)
     }
 
     test("the plist parses as a property list") {
@@ -1750,5 +2006,102 @@ func mediaKeyDestinationTests() {
         }
         check(text.contains("no now-playing client"), "the stream log carries it")
         check(text.contains("not ours"), "and says whose decision it is")
+    }
+}
+
+/// The comparison with the Mac's own AAC path, which is the question a listener asks as soon as
+/// this works: why does the Mac hold up further from the machine?
+///
+/// The answer is a number in bluetoothd's log, and these are the lines it has to be read from.
+func aacSessionTests() {
+    let configured = """
+        bluetoothd: [com.apple.bluetooth:Server.A2DP] A2DP configured at 44.1 KHz. Codec: AAC-LC, VBR max: 230 kbps. 1 frames * (12+668) bytes = 680 per RTP (max=879) every 23.22 ms
+        bluetoothd: [com.apple.bluetooth:Server.A2DP] adjustBitRateForMac- Adjusting Bitrate for HUAWEI FreeBuds 5
+        bluetoothd: [com.apple.bluetooth:Server.Audio] A2DP LinkQualityReport: Handle = 29 ReTx =  6.8% (  5 /  73), NAK =    0, NoSync =    5, TxPwr =  8 dBm, RSSI =  -54, rate = 230 kbps Flow off = 0
+        bluetoothd: [com.apple.bluetooth:Server.Audio] A2DP LinkQualityReport: Handle = 29 ReTx =  0.0% (  0 /   1), NAK =    0, NoSync =    0, TxPwr =  8 dBm, RSSI =  -56, rate = 230 kbps Flow off = 0
+        """
+
+    test("the AAC session is read from the numbers bluetoothd prints, not from a table") {
+        guard let session = AACSession.parse(configured) else {
+            check(false, "the session should parse")
+            return
+        }
+        check(session.sampleRate == 44100, "\(session.sampleRate)")
+        check(session.packetBytes == 680, "\(session.packetBytes)")
+        check(abs(session.intervalMilliseconds - 23.22) < 0.001, "\(session.intervalMilliseconds)")
+        // 680 bytes every 23.22 ms is 43 packets/s and 234 kbps: the number that explains the
+        // distance, derived from the log rather than copied from a datasheet.
+        check(abs(session.kbps - 234.3) < 0.5, "\(session.kbps)")
+        check(session.bitrateAdjustments == 1, "\(session.bitrateAdjustments)")
+        check(session.reports == 2, "\(session.reports)")
+        // The last report wins: it is the most recent state of the link.
+        check(session.rssi == -56, "\(session.rssi ?? 0)")
+        check(abs(session.reTx - 0) < 0.001, "\(session.reTx)")
+    }
+
+    test("the comparison is in kbps, the one unit both paths share") {
+        guard let session = AACSession.parse(configured) else {
+            check(false, "the session should parse")
+            return
+        }
+        // LDAC's floor at 48 kHz is 330: 1.4× what AAC asks, so the link has to be 1.4× better
+        // before this path is as steady. That is the whole explanation of the distance, and it is
+        // arithmetic on two numbers, not an opinion about codecs.
+        let line = session.comparison(floorKbps: 330)
+        check(line.contains("234 kbps"), line)
+        check(line.contains("330"), line)
+        check(line.contains("1.4"), line)
+    }
+
+    test("a log with no AAC session says so instead of inventing one") {
+        check(AACSession.parse("bluetoothd: nothing here") == nil)
+        // An LDAC configuration of our own is not an AAC session: the two paths must not be
+        // confused, or the comparison would be this program against itself.
+        check(AACSession.parse("A2DP configured at 48 KHz. Codec: LDAC, 990 kbps") == nil)
+    }
+
+    test("a new configuration resets the link numbers, because they describe another stream") {
+        let two = """
+            A2DP configured at 44.1 KHz. Codec: AAC-LC, VBR max: 230 kbps. 1 frames * (12+668) bytes = 680 per RTP (max=879) every 23.22 ms
+            A2DP LinkQualityReport: Handle = 29 ReTx = 80.0% (  4 /   5), RSSI =  -70, rate = 230 kbps
+            A2DP configured at 48 KHz. Codec: AAC-LC, VBR max: 320 kbps. 1 frames * (12+668) bytes = 680 per RTP (max=879) every 21.33 ms
+            """
+        guard let session = AACSession.parse(two) else {
+            check(false, "the session should parse")
+            return
+        }
+        check(session.sampleRate == 48000, "\(session.sampleRate)")
+        check(session.reports == 0, "the old stream's reports do not describe this one")
+        check(session.rssi == nil, "\(session.rssi ?? 0)")
+    }
+}
+
+/// The keeper asks bluetoothd for the link quality mode. How often it asks is a decision with a
+/// measured cost on both sides, and these are the numbers it is built from.
+func keeperPaceTests() {
+    test("the audio device coming and going is read from the last line, not the first") {
+        // bluetoothd registers the device when the headphones connect and erases it when the media
+        // channel is reopened — so both orders happen, and the later line is the true state.
+        let registered = """
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            Erased 1 audio device 40:DC:A5:0E:14:48-tacl
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            """
+        check(AudioStreamKeeper.hasRegisteredDevice(registered, uid: "40:DC:A5:0E:14:48-tacl"))
+        let erased = """
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            Erased 1 audio device 40:DC:A5:0E:14:48-tacl
+            """
+        check(!AudioStreamKeeper.hasRegisteredDevice(erased, uid: "40:DC:A5:0E:14:48-tacl"))
+    }
+
+    test("another device's registration is not ours") {
+        // bluetoothd prints one of these per announcing device, and the address is what tells them
+        // apart. Without this the keeper confirmed on somebody else's headphones.
+        let other = """
+            Register audio device AC:BD:70:5C:06:1C-tacl
+            Erased 1 audio device AC:BD:70:5C:06:1C-tacl
+            """
+        check(!AudioStreamKeeper.hasRegisteredDevice(other, uid: "40:DC:A5:0E:14:48-tacl"))
     }
 }
