@@ -52,6 +52,14 @@
 #define kVolumeControlID    4   // main (both channels)
 #define kVolumeLeftID       5
 #define kVolumeRightID      6
+// The mute is a *control* of its own, and it has to be one.
+//
+// The driver has always stored a muted flag and answered `kAudioBooleanControlPropertyValue`, but
+// no object in the control list was a boolean control — so the HAL had nothing to build a
+// device-level mute from, and the Mac's mute button did not reach this device at all. Measured
+// 2026-11-07: muting the Mac kept the audio playing in the headphones, because the flag existed
+// and nobody could set it.
+#define kMuteControlID      7
 
 // One second of 48 kHz stereo float: enough that a consumer waking every 10 ms never falls
 // behind, small enough to stay in cache-friendly territory.
@@ -424,9 +432,11 @@ static OSStatus driver_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, 
             *outDataSize = sizeof(AudioStreamRangedDescription);
             return kAudioHardwareNoError;
         case kAudioObjectPropertyControlList:
-            // Three controls: the main one and one per channel. The system asks for all three, and
-            // a device that answers only the main one leaves the per-channel volume unknown.
-            *outDataSize = inObjectID == kDeviceObjectID ? 3 * sizeof(AudioObjectID) : 0;
+            // Four controls: the main volume, one per channel, and the mute. The system asks for
+            // all of them, and a device that answers only the main one leaves the per-channel
+            // volume unknown — and a device with no boolean control has no mute the system can
+            // find.
+            *outDataSize = inObjectID == kDeviceObjectID ? 4 * sizeof(AudioObjectID) : 0;
             return kAudioHardwareNoError;
         case kAudioObjectPropertyBaseClass:
         case kAudioObjectPropertyClass:
@@ -520,12 +530,14 @@ static OSStatus driver_GetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
             return kAudioHardwareNoError;
         case kAudioObjectPropertyBaseClass:
             *(AudioClassID*)outData = inObjectID == kDeviceObjectID ? kAudioDeviceClassID
+                                      : inObjectID == kMuteControlID ? kAudioBooleanControlClassID
                                       : inObjectID >= kVolumeControlID ? kAudioLevelControlClassID
                                       : kAudioStreamClassID;
             *outDataSize = sizeof(AudioClassID);
             return kAudioHardwareNoError;
         case kAudioObjectPropertyClass:
             *(AudioClassID*)outData = inObjectID == kDeviceObjectID ? kAudioDeviceClassID
+                                      : inObjectID == kMuteControlID ? kAudioMuteControlClassID
                                       : inObjectID >= kVolumeControlID ? kAudioVolumeControlClassID
                                       : kAudioStreamClassID;
             *outDataSize = sizeof(AudioClassID);
@@ -638,7 +650,8 @@ static OSStatus driver_GetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
             ids[0] = kVolumeControlID;
             ids[1] = kVolumeLeftID;
             ids[2] = kVolumeRightID;
-            *outDataSize = 3 * sizeof(AudioObjectID);
+            ids[3] = kMuteControlID;
+            *outDataSize = 4 * sizeof(AudioObjectID);
             return kAudioHardwareNoError;
         }
         case kAudioLevelControlPropertyDecibelRange: {
@@ -778,9 +791,12 @@ static OSStatus driver_SetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
         case kAudioBooleanControlPropertyValue: {
             if (inDataSize < sizeof(UInt32)) { return kAudioHardwareBadPropertySizeError; }
             atomic_store(&gDriver.muted, *(const UInt32*)inData ? 1 : 0);
+            // Announced on the *control*, like the volume. The device-level mute the system shows
+            // is synthesised by the HAL from the control, and the HAL only re-reads it when the
+            // control says it changed — the same bug the volume had.
             if (gDriver.host != NULL) {
                 AudioObjectPropertyAddress changed = *inAddress;
-                gDriver.host->PropertiesChanged(gDriver.host, kDeviceObjectID, 1, &changed);
+                gDriver.host->PropertiesChanged(gDriver.host, kMuteControlID, 1, &changed);
             }
             return kAudioHardwareNoError;
         }

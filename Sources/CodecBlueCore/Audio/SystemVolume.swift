@@ -27,6 +27,20 @@ public final class SystemVolume: @unchecked Sendable {
     private var position: Float = 1
     private var muted = false
     private var listener: AudioObjectPropertyListenerBlock?
+    /// The last position this process pushed down the link, and when.
+    ///
+    /// AVRCP has no way to say "this is your own value coming back": a SET ABSOLUTE VOLUME we
+    /// sent is reported by the headphones as a volume *notification*, which is byte-for-byte what
+    /// their own volume key produces. Treating it as a user action is what made the slider
+    /// unwritable — measured 2026-11-08, the log showed `absolute 100%` followed by
+    /// `slider 100%`, and the slider could not be moved off 100% for the rest of the session.
+    ///
+    /// The time is part of the test, not an optimisation. Matching on the value alone would
+    /// swallow a real press: the headphones move in steps of 1/127, which is exactly the
+    /// quantisation error of an echo, so "close to what we sent" describes both. An echo is close
+    /// in value *and* arrives within a round trip; a press is close in value and arrives whenever
+    /// the listener presses.
+    private var pushed: (value: Float, at: UInt64)?
 
     /// The device the system is using for output, if it is ours. Returns nil when CodecBlue is not
     /// the default output: then there is nothing to read and the volume stays at 1.
@@ -231,6 +245,47 @@ public final class SystemVolume: @unchecked Sendable {
         return next
     }
 
+    /// Recorded when the value is sent down the link, so the echo can be recognised.
+    public func notePushed(_ value: Float) {
+        // Stored *quantised*, exactly as it went down the link: the headphones answer with the
+        // same 7-bit value, so the echo matches to the bit. Storing the unquantised slider
+        // position instead leaves a 1/127 gap that is the same size as one press of their own
+        // volume key — and then a press right after a push is swallowed as an echo.
+        let clamped = min(max(value, 0), 1)
+        let quantised = (clamped * 127).rounded() / 127
+        lock.lock()
+        pushed = (quantised, DispatchTime.now().uptimeNanoseconds)
+        lock.unlock()
+    }
+
+    /// How long after a push a report is still considered its echo. Measured AVRCP round trips on
+    /// these headphones: 15–60 ms, occasionally 180 ms under load. 400 ms is several times that
+    /// and still far shorter than any deliberate second press.
+    public static let echoWindow: TimeInterval = 0.4
+
+    /// A volume the headphones reported. Returns the new slider position, or nil when the report
+    /// is the echo of a value this process sent a moment ago.
+    ///
+    /// The tolerance is one AVRCP step (1/127): the headphones quantise, so 0.56 goes out as
+    /// 0x47 and comes back as 0.559 — a difference of 0.001 that would otherwise look like a
+    /// change and start the loop again from the other side.
+    @discardableResult
+    public func setFromHeadphones(_ value: Float) -> Float? {
+        lock.lock()
+        let echo: Bool
+        if let pushed {
+            let seconds = Double(DispatchTime.now().uptimeNanoseconds &- pushed.at) / 1e9
+            // A quarter of a step: wide enough to absorb the float round trip through 7 bits,
+            // far narrower than the full step a real press moves by.
+            echo = seconds <= Self.echoWindow && abs(pushed.value - value) <= 0.002
+        } else {
+            echo = false
+        }
+        lock.unlock()
+        guard !echo else { return nil }
+        return set(position: value)
+    }
+
     /// Sets the slider to an absolute position, for headphones that send SET ABSOLUTE VOLUME
     /// instead of a relative key.
     @discardableResult
@@ -272,10 +327,57 @@ public final class SystemVolume: @unchecked Sendable {
             mElement: kAudioObjectPropertyElementMain)
         var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else {
+        if AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr {
+            return value != 0
+        }
+        // The device-level mute is synthesised by the HAL from a boolean control, and it only
+        // exists once the driver publishes one. Measured 2026-11-07: the driver stored a muted
+        // flag and answered for it, but no object in its control list was a boolean control — so
+        // the Mac's mute button had nothing to write to and the headphones kept playing. Until
+        // the driver with `kMuteControlID` is installed, ask the control directly.
+        return readMuteFromControls(device: device)
+    }
+
+    /// The mute, read off the device's own boolean control.
+    ///
+    /// This is the same value the device-level property would report, reached one level down. It
+    /// exists because the two can disagree: the HAL synthesises `kAudioDevicePropertyMute` from
+    /// the control, so a driver that has the control but not the property (or the other way
+    /// round) is a real state, and reading only one of them makes the mute silently do nothing.
+    private static func readMuteFromControls(device: AudioDeviceID) -> Bool? {
+        var list = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyControlList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &list, 0, nil, &size) == noErr, size > 0 else {
             return nil
         }
-        return value != 0
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(device, &list, 0, nil, &size, &ids) == noErr else {
+            return nil
+        }
+        for control in ids {
+            var classAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioObjectPropertyClass,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var classID: AudioClassID = 0
+            var classSize = UInt32(MemoryLayout<AudioClassID>.size)
+            guard AudioObjectGetPropertyData(control, &classAddress, 0, nil, &classSize, &classID) == noErr
+            else { continue }
+            guard classID == kAudioMuteControlClassID else { continue }
+            var valueAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioBooleanControlPropertyValue,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain)
+            var value: UInt32 = 0
+            var valueSize = UInt32(MemoryLayout<UInt32>.size)
+            guard AudioObjectGetPropertyData(control, &valueAddress, 0, nil, &valueSize, &value) == noErr
+            else { continue }
+            return value != 0
+        }
+        return nil
     }
 
     /// The device the system is using for output, matched by name.

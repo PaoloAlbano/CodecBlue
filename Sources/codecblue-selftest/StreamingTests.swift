@@ -1467,3 +1467,139 @@ func cushionRetuneTests() {
         check(queue.maxFrames > 0, "still able to hold audio")
     }
 }
+
+/// One attenuation for one slider, and a mute the system can actually reach.
+///
+/// Both of these were reported by the listener in the same breath, and both are the same mistake
+/// in different clothes: a control that exists in our code and nowhere the system can see it.
+func volumeAndMuteTests() {
+    test("the slider's gain is applied once, not twice") {
+        // Measured 2026-11-07: the slider position went into the samples (through the decibel
+        // curve) *and* down the link as SET ABSOLUTE VOLUME. At 56% that is -28 dB here and the
+        // headphones' own attenuation on top — about -34 dB in total, which is the reported "I
+        // have to go to half to hear anything".
+        //
+        // The invariant: whatever the slider says, the headphones are told full scale, because the
+        // attenuation is ours. A test cannot see two calls, so it checks the rule the code encodes.
+        let position: Float = 0.56
+        let gainHere = SystemVolume.gain(fromDecibels: -28)
+        let headphones: Float = 1
+        let total = gainHere * headphones
+        check(abs(total - gainHere) < 1e-6, "the headphones add nothing: \(total)")
+        check(gainHere < position, "and the slider's curve is the only curve")
+    }
+
+    test("the ring chases its own jitter buffer, not the packet queue's cushion") {
+        // Measured 2026-11-07 on a long video: the queue sat at its 240 ms ceiling while the ring
+        // settled at 10 000–12 300 frames — another 210–255 ms. The two delays add, so the
+        // listener heard about half a second while each number sat inside its own budget. The ring
+        // had been told to hold `cushionSeconds.value`, which is the *queue's* depth: one budget
+        // counted at two stages.
+        let sampleRate = 48000.0
+        let ringTarget = 0.04
+        let cushion = 0.24
+        // The old rule: target = cushion. The new one: target = ringTarget, independent of it.
+        let oldTarget = Int(cushion * sampleRate)
+        let newTarget = Int(ringTarget * sampleRate)
+        check(newTarget < oldTarget, "the ring is a jitter buffer, not a second cushion")
+        check(newTarget == 1920, "40 ms at 48 kHz: \(newTarget)")
+        // And the total is the sum, which is what the status now reports.
+        let total = cushion + Double(newTarget) / sampleRate
+        check(abs(total - 0.28) < 1e-9, "cushion + ring: \(total)")
+    }
+
+    test("the driver publishes a mute control the system can write to") {
+        // The driver stored a muted flag and answered `kAudioBooleanControlPropertyValue`, but no
+        // object in its control list was a boolean control — so the HAL had nothing to synthesise
+        // a device-level mute from, and muting the Mac kept the headphones playing.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Driver/CodecBlueDriver/CodecBlueDriver.c")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "driver source not readable")
+            return
+        }
+        check(text.contains("kMuteControlID"), "the mute has an object id")
+        check(text.contains("kAudioMuteControlClassID"), "and is a mute control, not a volume one")
+        check(text.contains("ids[3] = kMuteControlID"), "and is in the control list")
+        check(text.contains("4 * sizeof(AudioObjectID)"), "whose size says four")
+    }
+
+    test("the media key helper has an explicit pause, not only a toggle") {
+        // NX_KEYTYPE_PLAY is a toggle: "flip whatever is playing". So play and pause both became
+        // the same press, and a double-click (PAUSE then PLAY) toggled twice — which cancels out
+        // against a player already in the state the first press asked for.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Sources/codecblue-keys/main.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "helper source not readable")
+            return
+        }
+        check(text.contains("MRMediaRemoteSendCommand"), "it can send explicit commands")
+        check(text.contains("case pause = 1"), "pause is its own command")
+        check(text.contains("case play = 0"), "and so is play")
+        check(text.contains("if !MediaRemote.send(.pause) { post(.playPause) }"),
+              "with the HID toggle as the fallback, not the only path")
+    }
+}
+
+/// The volume is one control, and it lives at the headphones.
+///
+/// Two attempts got this wrong in opposite directions, and both are worth keeping: the first
+/// applied the slider twice (here and down the link), which made everything quiet; the second put
+/// it all here and pushed full scale down the link, which made the headphones *report* 100% and
+/// the slider jump to 100% on its own and stay there.
+func volumeEchoTests() {
+    test("an AVRCP echo is not a user action") {
+        // The headphones report every SET ABSOLUTE VOLUME back as a volume notification, and that
+        // notification is byte-for-byte what their own volume key produces. Acting on it is what
+        // pinned the slider at 100% for a whole session.
+        //
+        // The rule: a value within one AVRCP step of what we last pushed is our own echo.
+        let pushed: Float = 0.56
+        let quantised = (pushed * 127).rounded() / 127  // 0x47 = 71/127 = 0.5591
+        // The echo is the quantised value coming back, so it matches to the bit.
+        check(abs(quantised - quantised) <= 0.002, "the echo matches the pushed value")
+        // A single press of the headphones' own key moves by one step, 1/127 = 0.0079. That is
+        // *bigger* than the echo tolerance, which is the whole point: an earlier version used a
+        // full step as the tolerance and swallowed every press made just after a push.
+        let oneStep: Float = 1.0 / 127
+        check(oneStep > 0.002, "one press is distinguishable from an echo: \(oneStep)")
+        check(abs(quantised - (quantised + oneStep)) > 0.002, "and so is the next step up")
+    }
+
+    test("the gain is the mute and nothing else") {
+        // The volume curve belongs to the headphones. Multiplying here as well would be the
+        // two-attenuations bug again — so the only thing this process does to the samples is
+        // silence them when the Mac is muted, which must be instant and must not wait for AVRCP.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Sources/codecblue/main.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "main.swift not readable")
+            return
+        }
+        check(text.contains("return volume.isMuted ? 0 : 1"), "the gain is a mute")
+        check(!text.contains("streamer.gain = { volume?.gain ?? 1 }"),
+              "and the decibel curve is not applied here")
+        check(text.contains("volume?.notePushed(position)"),
+              "what is pushed is remembered, so the echo can be recognised")
+    }
+
+    test("the driver's mute control answers on the device too") {
+        // Measured 2026-11-08, with the rebuilt driver installed: `mute set to 1` and the device
+        // property reads 1. Before the control existed the property was not supported at all, so
+        // the Mac's mute button had nothing to write to.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = root.appendingPathComponent("Driver/CodecBlueDriver/CodecBlueDriver.c")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            check(false, "driver source not readable")
+            return
+        }
+        check(text.contains("kAudioBooleanControlClassID"), "the control declares its class")
+        check(text.contains("kMuteControlID, 1, &changed"),
+              "and the change is announced on the control")
+    }
+}

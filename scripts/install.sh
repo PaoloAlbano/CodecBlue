@@ -41,6 +41,21 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
+# Refuse to run as root.
+#
+# Measured 2026-11-08: `sudo ./scripts/install.sh` built the whole project as root, so every file
+# in .build/out and in the app bundle came out owned by root — and then the next ordinary
+# `swift build` failed with "Operation not permitted" on files it could not overwrite, which looks
+# like a broken toolchain and is not. Only the driver needs privileges, and it asks for them
+# itself, one step at a time.
+if [ "$(id -u)" = "0" ]; then
+    echo "error: do not run this with sudo." >&2
+    echo "       It asks for sudo by itself, for the driver only. Running the whole script as" >&2
+    echo "       root leaves every build product owned by root, and the next build cannot" >&2
+    echo "       overwrite them." >&2
+    exit 1
+fi
+
 echo "1/3 building…"
 swift build 2>&1 | grep -E "error:" && exit 1
 # The icon is generated, not committed as a binary blob: it is 30 lines of Python that describe
@@ -48,10 +63,14 @@ swift build 2>&1 | grep -E "error:" && exit 1
 if [ -f "scripts/make-icon.py" ] && [ ! -f "Resources/AppIcon.icns" ]; then
     python3 scripts/make-icon.py >/dev/null 2>&1 || echo "   (icon not generated: is pillow installed?)"
 fi
-sh scripts/build-menu-app.sh >/dev/null 2>&1 || {
+# The script may build into a fallback path (see its own note about root-owned bundles), so ask
+# it where the bundle ended up rather than assuming.
+MENU_APP=$(sh scripts/build-menu-app.sh 2>/dev/null | sed -n 's/^built \(.*\)$/\1/p' | tail -1)
+if [ -z "$MENU_APP" ] || [ ! -d "$MENU_APP" ]; then
     echo "error: could not build the menu bar app" >&2
+    sh scripts/build-menu-app.sh >&2 || true
     exit 1
-}
+fi
 
 echo "2/3 installing the programs into $APP_DIR…"
 mkdir -p "$APP_DIR"
@@ -61,7 +80,7 @@ mkdir -p "$APP_DIR"
 cp .build/debug/codecblue "$APP_DIR/codecblue"
 cp .build/debug/codecblue-keys "$APP_DIR/codecblue-keys"
 rm -rf "$APP_DIR/CodecBlue.app"
-cp -R .build/CodecBlueMenu.app "$APP_DIR/CodecBlue.app"
+cp -R "$MENU_APP" "$APP_DIR/CodecBlue.app"
 # The bundle's own copy of the helper is the one it will find; keep both in step.
 cp .build/debug/codecblue-keys "$APP_DIR/CodecBlue.app/Contents/MacOS/codecblue-keys"
 codesign --force --sign - "$APP_DIR/CodecBlue.app" 2>/dev/null || true

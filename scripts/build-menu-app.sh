@@ -14,6 +14,15 @@ cd "$(dirname "$0")/.."
 APP=".build/CodecBlueMenu.app"
 BINARY=".build/debug/CodecBlueMenu"
 
+# The bundle may be owned by root, left behind by a `sudo ./scripts/install.sh` that built
+# everything as root. `rm -rf` then fails with "Permission denied" and the script dies halfway,
+# which reads as a broken build. Build somewhere writable instead of fighting over ownership —
+# the same rule `build-driver.sh` already follows.
+if [ -d "$APP" ] && [ ! -w "$APP" ]; then
+    APP=".build/menu-app-$(id -u).app"
+    echo "note: .build/CodecBlueMenu.app is not writable (left over from a sudo build); using $APP"
+fi
+
 echo "building…"
 swift build --product CodecBlueMenu 2>&1 | grep -E "error:|warning: " || true
 

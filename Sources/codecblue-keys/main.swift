@@ -88,24 +88,71 @@ func requestTrust() {
     _ = AXIsProcessTrustedWithOptions(options)
 }
 
+/// Sends an explicit transport command through MediaRemote, the private framework macOS itself
+/// uses for the Now Playing keys.
+///
+/// The HID key `NX_KEYTYPE_PLAY` is a *toggle*: it means "flip whatever is playing". So `play` and
+/// `pause` both became the same key press, and a double-click on the headphones — which sends
+/// PAUSE then PLAY — toggled twice. That works only if the player agrees with the headphones about
+/// the current state. Measured 2026-11-07: the listener's double-click did nothing, because the
+/// two toggles cancelled out against a player that was already in the state the first press asked
+/// for.
+///
+/// MediaRemote has separate commands (`kMRPlay` = 0, `kMRPause` = 1), which is what makes an
+/// explicit pause stay paused. It is a private framework, so it is loaded at run time and its
+/// absence is not fatal: the HID toggle stays as the fallback.
+enum MediaRemote {
+    typealias SendCommand = @convention(c) (Int, CFTypeRef?) -> Void
+    private static let send: SendCommand? = {
+        let path = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+        guard let handle = dlopen(path, RTLD_NOW),
+              let symbol = dlsym(handle, "MRMediaRemoteSendCommand") else { return nil }
+        return unsafeBitCast(symbol, to: SendCommand.self)
+    }()
+
+    static var isAvailable: Bool { send != nil }
+
+    /// The command numbers, spelled out: they are not in any header Swift can see.
+    enum Command: Int {
+        case play = 0
+        case pause = 1
+        case togglePlayPause = 2
+        case nextTrack = 4
+        case previousTrack = 5
+    }
+
+    @discardableResult
+    static func send(_ command: Command) -> Bool {
+        guard let send else { return false }
+        send(command.rawValue, nil)
+        return true
+    }
+}
+
 func handle(_ line: String) -> Bool {
     switch line {
     case "play":
-        post(.playPause)
+        // Explicit, not a toggle: see MediaRemote. The HID key is the fallback for a system where
+        // the framework cannot be loaded, and there a toggle is all that exists.
+        if !MediaRemote.send(.play) { post(.playPause) }
     case "pause":
-        post(.playPause)
+        if !MediaRemote.send(.pause) { post(.playPause) }
     case "toggle":
-        post(.playPause)
+        if !MediaRemote.send(.togglePlayPause) { post(.playPause) }
     case "next":
-        post(.next)
+        if !MediaRemote.send(.nextTrack) { post(.next) }
     case "previous":
-        post(.previous)
+        if !MediaRemote.send(.previousTrack) { post(.previous) }
     case "fast":
         post(.fast)
     case "rewind":
         post(.rewind)
     case "status":
-        print(isTrusted() ? "ok status" : "denied")
+        // Both facts, because either one missing breaks a different button: no Accessibility and
+        // nothing is posted at all; no MediaRemote and play/pause degrade to a toggle.
+        let trust = isTrusted() ? "trusted" : "not trusted"
+        let remote = MediaRemote.isAvailable ? "mediaremote" : "hid only"
+        print(isTrusted() ? "ok status \(trust), \(remote)" : "denied \(trust), \(remote)")
         return true
     case "quit":
         return false

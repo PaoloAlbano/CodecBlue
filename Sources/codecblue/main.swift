@@ -531,6 +531,11 @@ func playSystem(_ address: String, options: [String]) async throws {
         // socket) plus the queue in flight. Reporting only the cushion would understate it by the
         // packets already committed, which is where the extra milliseconds hide.
         out["cushion_ms"] = String(format: "%.0f", streamer.currentCushion * 1000)
+        // The volume as the two places that matter see it: the slider the system shows, and what
+        // the headphones were last told. When these disagree the listener hears one of them and
+        // moves the other, which is the whole class of bug this area keeps producing.
+        out["slider"] = String(format: "%.0f", (volume?.reported ?? 1) * 100)
+        out["muted"] = (volume?.isMuted ?? false) ? "yes" : "no"
         out["latency_ms"] = String(format: "%.0f",
                                    (streamer.currentCushion + Double(ring.available) / Double(ring.sampleRate)) * 1000)
         return out
@@ -573,7 +578,26 @@ func playSystem(_ address: String, options: [String]) async throws {
     // The Mac's slider must reach the headphones, not just our own mixer. Measured 2026-11-06:
     // the slider changed the gain we apply and the headphones kept their own attenuation, so the
     // two volumes were independent — moving the slider did not move what the headphones do.
-    volume?.onChange = { [weak streamer] position in
+    // ONE attenuation, not two — and it lives at the headphones.
+    //
+    // Measured 2026-11-07: the slider was applied in two places at once — this process multiplied
+    // the samples by the decibel curve, *and* the same slider position went down the link as SET
+    // ABSOLUTE VOLUME. At 56% the samples were already at -28 dB and the headphones attenuated
+    // again on top: about -34 dB, the reported "sono costretto ad arrivare a metà".
+    //
+    // The first attempt at a fix held the headphones at full scale and kept the whole curve here.
+    // That was wrong for a reason the log made obvious within a minute: pushing 1.0 makes the
+    // headphones *report* 100%, the report is indistinguishable from a finger on their own volume
+    // key, and the slider jumped to 100% on its own. A control that writes itself is worse than a
+    // quiet one.
+    //
+    // So the attenuation goes where macOS itself puts it for these headphones: down the link. The
+    // slider moves, the headphones follow, and this process multiplies by nothing. That is also
+    // what makes the headphones' own keys and the Mac's slider one control instead of two.
+    volume?.onChange = { [weak volume, weak streamer] position in
+        // Remember what we sent before sending it: the headphones report it back as a volume
+        // notification, and that report is indistinguishable from their own volume key.
+        volume?.notePushed(position)
         streamer?.setHeadphoneVolume(position)
     }
     // The push at start-up cannot happen here: `setUp` is what opens the AVRCP channel, and it
@@ -581,9 +605,15 @@ func playSystem(_ address: String, options: [String]) async throws {
     // log showed no outgoing frame at all until the channel existed. So it is sent right after
     // `setUp`, below.
     streamer.onAbsoluteVolume = { [volume, say] value in
-        guard let volume, let position = volume.set(position: value) else { return }
+        // `setFromHeadphones`, not `set`: the headphones report back every value we push, and
+        // acting on that echo is what pinned the slider at 100% — measured 2026-11-08, the log
+        // showed `absolute 100%` then `slider 100%` and the slider could not be moved again.
+        guard let volume, let position = volume.setFromHeadphones(value) else { return }
         say(String(format: "headphone volume: slider %.0f%% -> gain %.1f%%",
                    position * 100, volume.gain * 100))
+        // No push back. `set(position:)` has already updated our copy of the slider, so the
+        // refresh that follows sees no change and does not echo the value to the headphones —
+        // which is what stopped the earlier version from chasing its own tail.
     }
     // The lead stays small on purpose, and this is measured, not assumed: setting it to the
     // cushion depth (250 ms) made the encoder demand audio the writer had not produced yet, so
@@ -636,9 +666,43 @@ func playSystem(_ address: String, options: [String]) async throws {
     // The servo drains the surplus by reading a little more than a block and compressing it back
     // to exactly one block, so the link still carries real time and only the pitch moves. Capped
     // at 1.5%: 0.26 of a semitone, not audible on speech, and it clears 250 ms in about 15 s.
+    // The ring's target is the *remainder* of the budget, not the queue's cushion.
+    //
+    // Measured 2026-11-07, on a long video: the queue sat at its 240 ms ceiling and the ring
+    // settled at 10 000–12 300 frames — another 210–255 ms. The two delays add, so the listener
+    // was hearing about half a second while every number in the report looked like it was inside
+    // its budget. Both were: the bug is that the ring was told to hold `cushionSeconds.value`,
+    // which is the queue's own depth. Two stages, one budget, counted twice.
+    //
+    // So the ring chases whatever is left: budget minus what the queue is holding. When the link
+    // is healthy the queue holds 60 ms and the ring gets 190; when the link stalls and the queue
+    // widens to 240, the ring is told to empty itself down to 10 ms, which is right — the audio in
+    // the ring is the audio that has not been encoded yet, and it is the one that can still be
+    // thrown away cheaply.
+    // The ring's target is its own small jitter buffer — NOT the queue's cushion.
+    //
+    // Measured 2026-11-07, on a long video: the queue sat at its 240 ms ceiling while the ring
+    // settled at 10 000–12 300 frames, another 210–255 ms. The two delays add, so the listener was
+    // hearing about half a second while every number in the report sat inside its own budget. Both
+    // were — the ring had been told to hold `cushionSeconds.value`, which is the *queue's* depth.
+    // One budget counted at two stages.
+    //
+    // The ring is not a cushion for the link: a stall in the link fills the queue, the encoder
+    // stops, and the ring fills behind it as a *consequence*. Draining the ring to the queue's
+    // depth therefore keeps a second copy of the delay that the queue is already holding. Its job
+    // is only to be deep enough that a read never comes back short.
+    //
+    // So it chases `ringTarget`, which is defined below as 40 ms and is the writer's jitter, not
+    // the link's. Total latency is then cushion + ring + packets in flight, and each number means
+    // one thing.
+    // The throttle holds the *ring* at a small depth — the writer's jitter, not the link's
+    // cushion. The link's cushion is the packet queue, which has its own adaptation.
+    // The ring's floor: enough that a read never comes back short, never more. It is a jitter
+    // buffer for the writer, not a cushion for the link — the link's cushion is the queue.
+    let ringTarget = 0.04
     streamer.drainBoost = {
         let depth = ring.available
-        let target = Int(cushionSeconds.value * Double(ring.sampleRate))
+        let target = Int(ringTarget * Double(ring.sampleRate))
         guard target > 0, depth > target else { return 0 }
         let excess = Double(depth - target) / Double(target)
         return min(0.015, excess * 0.02)
@@ -649,9 +713,6 @@ func playSystem(_ address: String, options: [String]) async throws {
         ring.staleAfterFrames = Int(room * Double(ring.sampleRate))
     }
     ring.staleAfterFrames = Int((budget - queueDuration) * Double(ring.sampleRate))
-    // The throttle holds the *ring* at a small depth — the writer's jitter, not the link's
-    // cushion. The link's cushion is the packet queue, which has its own adaptation.
-    let ringTarget = 0.04
     // Clock drift between the Mac and the headphones lives in `A2DPStreamer.driftCorrection`,
     // because it has to be applied by resampling and not by reading the ring more slowly: the
     // first attempt moved the clock anchor, which made us read fewer frames than the driver
@@ -673,7 +734,15 @@ func playSystem(_ address: String, options: [String]) async throws {
     }
     streamer.adaptBitrate = adapt
     streamer.sendBufferPackets = sendBufferPackets
-    streamer.gain = { volume?.gain ?? 1 }
+    // The gain is the mute, and nothing else.
+    //
+    // The volume curve belongs to the headphones now (see `volume?.onChange`), so multiplying here
+    // as well would be the two-attenuations bug again. The mute is different: it must be
+    // instantaneous and it must work even if the link is busy, so it is applied here as a zero.
+    streamer.gain = { [weak volume] in
+        guard let volume else { return 1 }
+        return volume.isMuted ? 0 : 1
+    }
     box.streamer = streamer
     // nil = take whatever the headphones offer; the device's own rate is only a preference.
     // Ask for the device's own rate. It is what the audio already is, so asking for it means no
@@ -685,8 +754,12 @@ func playSystem(_ address: String, options: [String]) async throws {
     // Without this the two volumes are independent: the slider moves our gain and the headphones
     // keep their own attenuation, which is exactly what was reported.
     if let volume {
+        // Tell the headphones where the slider is, so the two agree from the first second. This
+        // is the same push `onChange` does; doing it here as well costs one frame and removes the
+        // window where the headphones are at whatever the last session left them.
         streamer.setHeadphoneVolume(volume.reported)
-        log(String(format: "headphones told to play at %.0f%% (the Mac's slider)", volume.reported * 100))
+        log(String(format: "headphones told to play at %.0f%% (the Mac's slider)",
+                   volume.reported * 100))
     }
     // The device runs at 48 kHz and the headphones may take 44.1: convert rather than refuse.
     let resampler = Resampler(from: ring.sampleRate, to: configuration.sampleRate)
