@@ -1,5 +1,16 @@
 #!/bin/sh
 # Runs the development build from anywhere. `codecblue system ADDR` is the real use: it takes
 # whatever macOS is sending to the CodecBlue device and streams it to the headphones in LDAC.
+#
+# This is a convenience for a checkout, not the installed program: `scripts/install.sh` puts the
+# real copy in ~/Applications/CodecBlue, and that is the one the LaunchAgent points at. If the
+# build is missing it says so, because "no such file or directory" from a shell script reads as
+# a broken install rather than as "you have not built it yet".
 HERE=$(cd "$(dirname "$0")" && pwd)
-exec "$HERE/.build/debug/codecblue" "$@"
+BINARY="$HERE/.build/debug/codecblue"
+if [ ! -x "$BINARY" ]; then
+    echo "codecblue: no build at $BINARY" >&2
+    echo "           run 'make build' (or 'make test') first" >&2
+    exit 1
+fi
+exec "$BINARY" "$@"

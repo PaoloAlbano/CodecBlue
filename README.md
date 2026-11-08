@@ -9,8 +9,14 @@ kernel extensions, no root daemon — and no proprietary app deciding which code
 > **Status: LDAC works end to end, from the Mac's own output.** Pick the **CodecBlue** output
 > device and every app plays through it in LDAC — no root, no kernel extension, no daemon.
 > Measured on 2026-11-07 with Huawei FreeBuds 5 on a MacBook's built-in controller: 336 kbps
-> of LDAC MQ, 0% of audio dropped, 0 skips, cushion 40 ms, ~60 ms of latency added by this
+> of LDAC, 0% of audio dropped, 0 skips, cushion 40 ms, ~60 ms of latency added by this
 > program, verified by ear.
+>
+> The level is not a switch between three names. libldac has **five** bitrates — 990, 660,
+> 492, 396 and 330 kbps at 48 kHz — and Sony named only three of them. CodecBlue measures what
+> the link carries and picks the highest rung that fits in 85% of it, because on a link that
+> carries ~530 kbps, 660 throws away a third of the audio and 330 leaves half the bitrate on
+> the table. `codecblue levels` shows the ladder and what fits here.
 >
 > Three findings did most of the work, and each is written up with its measurements in
 > `notes/findings/2026-11-05-play-ldac-queue.md`:
@@ -25,7 +31,8 @@ kernel extensions, no root daemon — and no proprietary app deciding which code
 > The ceiling of ~500 kbps on this machine is a controller limit: it never negotiates 3-slot
 > packets (`Link Adaptive Packet type support = 0`) and macOS does not expose
 > `HCISetACLPacketType`. LDAC HQ at 990 kbps is therefore not reachable here, and that is a
-> property of the hardware, not of this program.
+> property of the hardware, not of this program — which is why the level is chosen from the
+> measured bitrate instead of from a preference.
 
 ## How it works
 
@@ -34,16 +41,20 @@ and takes over **only your headphones' audio channels**:
 
 1. It asks `bluetoothd` (through its classic Bluetooth XPC service) for the headphones'
    A2DP signaling and media channels, and for their remote-control (AVRCP) channel.
-2. It negotiates the codec itself (AVDTP) and streams audio encoded with LDAC, aptX, AAC or
-   SBC XQ.
+2. It negotiates the codec itself (AVDTP) and streams audio encoded with **LDAC**. aptX, AAC
+   and SBC are the plan, not a claim: a pair of headphones that offers no LDAC endpoint gets an
+   error that says so, instead of a configuration puzzle.
 3. Audio comes from a **CodecBlue virtual output device**: pick it like any other output.
-4. **Calls work.** When a call app uses the microphone, CodecBlue hands the headphones back
-   to macOS, so the call uses the headphones' microphone as usual. When the call ends,
-   CodecBlue takes the headphones back.
+4. **Calls need a hand, for now.** CodecBlue holds the headphones' hands-free channel and
+   refuses calls on it, so a call app cannot quietly open a SCO link and starve the stream.
+   The hand-back itself is not automatic yet: `codecblue release ADDR` drops the link and
+   lets macOS reconnect, and starting the stream again takes the headphones back. Automatic
+   hand-off during a call is the next thing to build.
 
 Keyboards, mice and every other Bluetooth device stay with macOS and keep working.
 
-Requirements (planned): Apple Silicon, macOS 14.2 or later; tested on macOS 27.
+Requirements: Apple Silicon, macOS 14.2 or later. Built and tested on macOS 27 with the
+Command Line Tools alone — no full Xcode.
 
 > ⚠️ CodecBlue relies on **private macOS interfaces**. A macOS update can break it; when
 > that happens, the headphones simply fall back to macOS.
@@ -53,8 +64,8 @@ Requirements (planned): Apple Silicon, macOS 14.2 or later; tested on macOS 27.
 Requirements: Xcode Command Line Tools (Swift 6). Full Xcode is not needed.
 
 ```sh
-git clone --recurse-submodules <repo-url>
-cd codecblue
+git clone --recurse-submodules https://github.com/PaoloAlbano/CodecBlue.git
+cd CodecBlue
 make test                          # build + the unit tests (what CI runs)
 .build/debug/codecblue version
 .build/debug/codecblue lookup AA:BB:CC:DD:EE:FF   # what bluetoothd knows about your headphones
@@ -89,23 +100,26 @@ It lives in the menu bar: pick your headphones, press **Start streaming**, and e
 plays through them in LDAC. Closing the window does not stop the music — the agent owns the
 stream, and brings it back when the headphones do.
 
-From the menu you can also change the LDAC level while it plays (`HQ`, `SQ`, `MQ`) and the
-device's sample rate.
+From the menu you can also change the LDAC level while it plays — the whole ladder, with the
+rung this link would actually use ticked — and the device's sample rate.
 
 From a terminal, the same things:
 
 ```sh
 codecblue devices                # the headphones macOS knows, and whether they are on
 codecblue status                 # what a running stream is doing
-codecblue quality HQ             # change the level without interrupting playback
+codecblue quality HQ             # the ceiling: as good as this link allows, up to HQ
+codecblue quality 2              # or a rung with no name: 492 kbps
 codecblue adapt on               # or let it choose the level itself
+codecblue levels                 # the whole ladder, and what fits here
+codecblue compare                # this link against the Mac's own AAC
 codecblue rate 44100             # the device's rate; applies after `sudo killall coreaudiod`
 ```
 
 Without the app, the stream can also be run by hand:
 
 ```sh
-./codecblue system AA:BB:CC:DD:EE:FF --quality MQ
+./codecblue system AA:BB:CC:DD:EE:FF --quality LQ
 ```
 
 `Ctrl-C` stops cleanly and hands the headphones back to macOS.
@@ -118,7 +132,9 @@ Without the app, the stream can also be run by hand:
 | `codecblue tone FILE SECS [--sweep]` | Write a test signal: a constant sine, or a sweep |
 | `codecblue devices` | The headphones macOS knows, and whether they are on |
 | `codecblue status` | What a running stream is doing |
-| `codecblue quality HQ\|SQ\|MQ` | Change the level while it plays |
+| `codecblue levels` | The whole ladder, and what fits on this link |
+| `codecblue compare` | This link against the Mac's own AAC, in kbps |
+| `codecblue quality HQ\|SQ\|LQ\|0-4` | The ceiling, while it plays. A level is a limit, not a resting place |
 | `codecblue adapt on\|off` | Let it choose the level itself |
 | `codecblue cushion 40` | The cushion in ms — this is the latency |
 | `codecblue rate 44100\|48000` | The device's sample rate (after a coreaudiod restart) |
@@ -126,7 +142,7 @@ Without the app, the stream can also be run by hand:
 | `codecblue agent install\|remove\|status` | The LaunchAgent |
 | `codecblue handlers device\|general` | Which handler answers each known message |
 
-Options for `system` and `play`: `--quality HQ|SQ|MQ` (start of the adaptive ladder),
+Options for `system` and `play`: `--quality HQ|SQ|LQ|0-4` (the ceiling of the ladder),
 `--queue-ms` (the cushion, and therefore the latency), `--adapt`, `--keep-link-quality`,
 `--sndbuf-packets`, `--gain`.
 
@@ -148,12 +164,13 @@ worse. Testing a link with such a file tests the file. This cost a day.
 | `scripts/build-driver.sh` | Builds the driver, and installs or removes it with `--install` / `--uninstall` |
 | `scripts/build-menu-app.sh` | Assembles `CodecBlueMenu.app` (a bundle is needed for `LSUIElement`) |
 | `scripts/install.sh` | Installs all three pieces, or removes them with `--uninstall` |
+| `Makefile` | `make test` builds and runs the self-test — the same command CI runs |
 | `notes/findings/` | What was measured and what it proved, including the dead ends |
 | `third_party/libldac/` | AOSP libldac (git submodule, unmodified) |
 
-Only LDAC is implemented. aptX, AAC and SBC are named in the introduction as the goal, not as
-a claim: headphones that do not offer LDAC cannot be driven by this yet, and the error says so
-explicitly rather than looking like a configuration problem.
+Only LDAC is implemented. aptX, AAC and SBC are the plan, not a claim: headphones that do not
+offer an LDAC endpoint cannot be driven by this yet, and the error says so explicitly rather
+than looking like a configuration problem.
 
 The menu bar app is a thin client: everything it shows comes from the list of headphones macOS
 knows and from the control channel of a running stream, and everything it does is write the
