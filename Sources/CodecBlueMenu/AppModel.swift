@@ -72,7 +72,8 @@ final class AppModel: ObservableObject {
     var headline: String {
         if isStreaming { return "Streaming in LDAC" }
         if let address = selectedAddress,
-           let device = headphones.first(where: { $0.address == address }) {
+            let device = headphones.first(where: { $0.address == address })
+        {
             return device.isConnected
                 ? "\(device.name) is connected, not streaming"
                 : "\(device.name) is off"
@@ -192,8 +193,9 @@ final class AppModel: ObservableObject {
         do {
             try LaunchAgent.install(
                 address: address,
-                arguments: LaunchAgent.arguments(quality: Self.level(level), adapt: adapt,
-                                                 cushionMilliseconds: cushionMilliseconds))
+                arguments: LaunchAgent.arguments(
+                    quality: Self.level(level), adapt: adapt,
+                    cushionMilliseconds: cushionMilliseconds))
         } catch {
             note = "could not remember the setting: \(error.localizedDescription)"
         }
@@ -227,8 +229,9 @@ final class AppModel: ObservableObject {
             // forgotten there is a setting that silently reverts.
             try LaunchAgent.install(
                 address: address,
-                arguments: LaunchAgent.arguments(quality: Self.level(quality), adapt: adapt,
-                                                 cushionMilliseconds: cushionMilliseconds))
+                arguments: LaunchAgent.arguments(
+                    quality: Self.level(quality), adapt: adapt,
+                    cushionMilliseconds: cushionMilliseconds))
             try LaunchAgent.load()
             note = nil
         } catch {

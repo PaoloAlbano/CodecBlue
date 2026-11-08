@@ -83,7 +83,9 @@ public final class ChannelSocket: @unchecked Sendable {
 
     private func flush() {
         while !pending.isEmpty {
-            let written = pending.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, pending.count, 0) }
+            let written = pending.withUnsafeBytes {
+                Darwin.send(fd, $0.baseAddress, pending.count, 0)
+            }
             if written > 0 {
                 pending.removeFirst(written)
             } else if written < 0 && (errno == EAGAIN || errno == EINTR) {

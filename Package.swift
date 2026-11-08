@@ -27,8 +27,10 @@ let package = Package(
             // possible at all: LDAC itself has only 330 / 660 / 990 kbps at 48 kHz.
             sources: ["src/ldaclib.c", "src/ldacBT.c", "abr/src/ldacBT_abr.c"],
             publicHeadersPath: "inc",
-            cSettings: [.headerSearchPath("src"), .headerSearchPath("abr/inc"),
-                        .unsafeFlags(["-w"])]
+            cSettings: [
+                .headerSearchPath("src"), .headerSearchPath("abr/inc"),
+                .unsafeFlags(["-w"]),
+            ]
         ),
         // Engine: bluetoothd channel broker, AVDTP/AVRCP, codecs, session state machine.
         .target(name: "CodecBlueCore", dependencies: ["CLDAC"]),

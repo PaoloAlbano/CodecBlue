@@ -18,7 +18,9 @@ func devices() -> [(AudioDeviceID, String)] {
             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var name: CFString = "" as CFString
         var nsize = UInt32(MemoryLayout<CFString>.size)
-        guard AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nsize, &name) == noErr else { continue }
+        guard AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nsize, &name) == noErr else {
+            continue
+        }
         // only devices with output streams
         var streamAddr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
@@ -38,12 +40,14 @@ if args.count < 2 {
     exit(0)
 }
 guard let match = list.first(where: { $0.1.localizedCaseInsensitiveContains(args[1]) }) else {
-    print("not found"); exit(1)
+    print("not found")
+    exit(1)
 }
 var addr = AudioObjectPropertyAddress(
     mSelector: kAudioHardwarePropertyDefaultOutputDevice,
     mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
 var id = match.0
-let status = AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
-                                        UInt32(MemoryLayout<AudioDeviceID>.size), &id)
+let status = AudioObjectSetPropertyData(
+    AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
+    UInt32(MemoryLayout<AudioDeviceID>.size), &id)
 print(status == noErr ? "set \(match.1)" : "failed \(status)")

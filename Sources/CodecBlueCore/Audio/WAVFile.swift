@@ -14,11 +14,12 @@ public struct WAVFile: Sendable {
     public var duration: Double { Double(frameCount) / Double(sampleRate) }
 
     public enum WAVError: Error, CustomStringConvertible {
-        case notWAV, unsupported(String)
+        case notWAV
+        case unsupported(String)
         public var description: String {
             switch self {
             case .notWAV: "not a WAV file"
-            case let .unsupported(what): "unsupported WAV: \(what)"
+            case .unsupported(let what): "unsupported WAV: \(what)"
             }
         }
     }
@@ -33,11 +34,15 @@ public struct WAVFile: Sendable {
         let b = [UInt8](data)
         func u16(_ i: Int) -> Int { Int(b[i]) | Int(b[i + 1]) << 8 }
         func u32(_ i: Int) -> Int { u16(i) | u16(i + 2) << 16 }
-        guard b.count >= 12, b[0..<4] == [0x52, 0x49, 0x46, 0x46], b[8..<12] == [0x57, 0x41, 0x56, 0x45]
+        guard b.count >= 12, b[0..<4] == [0x52, 0x49, 0x46, 0x46],
+            b[8..<12] == [0x57, 0x41, 0x56, 0x45]
         else { throw WAVError.notWAV }
 
         var i = 12
-        var format = 0, channels = 0, rate = 0, bits = 0
+        var format = 0
+        var channels = 0
+        var rate = 0
+        var bits = 0
         var pcm: ArraySlice<UInt8>?
         while i + 8 <= b.count {
             let id = String(bytes: b[i..<i + 4], encoding: .ascii) ?? ""
@@ -69,15 +74,20 @@ public struct WAVFile: Sendable {
                 let at = base + f * frame + source * width
                 let value: Float
                 switch (format, bits) {
-                case (1, 16): value = Float(Int16(bitPattern: UInt16(b[at]) | UInt16(b[at + 1]) << 8)) / 32768
+                case (1, 16):
+                    value = Float(Int16(bitPattern: UInt16(b[at]) | UInt16(b[at + 1]) << 8)) / 32768
                 case (1, 24):
                     let raw = Int32(b[at]) | Int32(b[at + 1]) << 8 | Int32(b[at + 2]) << 16
                     value = Float((raw << 8) >> 8) / 8_388_608
                 case (1, 32):
-                    let raw = UInt32(b[at]) | UInt32(b[at + 1]) << 8 | UInt32(b[at + 2]) << 16 | UInt32(b[at + 3]) << 24
+                    let raw =
+                        UInt32(b[at]) | UInt32(b[at + 1]) << 8 | UInt32(b[at + 2]) << 16 | UInt32(
+                            b[at + 3]) << 24
                     value = Float(Int32(bitPattern: raw)) / 2_147_483_648
                 case (3, 32):
-                    let raw = UInt32(b[at]) | UInt32(b[at + 1]) << 8 | UInt32(b[at + 2]) << 16 | UInt32(b[at + 3]) << 24
+                    let raw =
+                        UInt32(b[at]) | UInt32(b[at + 1]) << 8 | UInt32(b[at + 2]) << 16 | UInt32(
+                            b[at + 3]) << 24
                     value = Float(bitPattern: raw)
                 default: throw WAVError.unsupported("format \(format), \(bits) bits")
                 }
@@ -94,8 +104,12 @@ public struct WAVFile: Sendable {
         var data = Data()
         let frames = frameCount
         let byteCount = frames * 4  // stereo, 16-bit
-        func u32(_ value: Int) { withUnsafeBytes(of: UInt32(value).littleEndian) { data.append(contentsOf: $0) } }
-        func u16(_ value: Int) { withUnsafeBytes(of: UInt16(value).littleEndian) { data.append(contentsOf: $0) } }
+        func u32(_ value: Int) {
+            withUnsafeBytes(of: UInt32(value).littleEndian) { data.append(contentsOf: $0) }
+        }
+        func u16(_ value: Int) {
+            withUnsafeBytes(of: UInt16(value).littleEndian) { data.append(contentsOf: $0) }
+        }
         data.append(contentsOf: Array("RIFF".utf8))
         u32(36 + byteCount)
         data.append(contentsOf: Array("WAVEfmt ".utf8))
@@ -112,7 +126,9 @@ public struct WAVFile: Sendable {
             let clamped = max(-1, min(1, samples[i]))
             // The negative side reaches -32768: build the value as signed, then reinterpret.
             let value = Int16(clamping: Int((clamped * 32_767).rounded()))
-            withUnsafeBytes(of: UInt16(bitPattern: value).littleEndian) { data.append(contentsOf: $0) }
+            withUnsafeBytes(of: UInt16(bitPattern: value).littleEndian) {
+                data.append(contentsOf: $0)
+            }
         }
         try data.write(to: url)
     }
@@ -128,8 +144,10 @@ public struct WAVFile: Sendable {
     /// A constant sine has no transients at all: if it crackles, the crackle is the transport.
     /// - Parameter amplitude: 0…1. Low on purpose: LDAC at 330 kbps is happiest with headroom,
     ///   and a quiet tone makes a click stand out against the silence between samples.
-    public static func sine(frequency: Float = 440, sampleRate: Int = 48000,
-                            seconds: Double = 30, amplitude: Float = 0.15) -> WAVFile {
+    public static func sine(
+        frequency: Float = 440, sampleRate: Int = 48000,
+        seconds: Double = 30, amplitude: Float = 0.15
+    ) -> WAVFile {
         let frames = Int(Double(sampleRate) * seconds)
         var samples = [Float](repeating: 0, count: frames * 2)
         // The frequency is rounded to a whole number of cycles in the file, so the last sample
@@ -147,11 +165,14 @@ public struct WAVFile: Sendable {
     /// A slow sine sweep, 100 Hz to 8 kHz, for hearing what the codec does across the band.
     /// Each frequency is held for a moment and joined with a crossfade, so the sweep itself has
     /// no transients to blame.
-    public static func sweep(sampleRate: Int = 48000, seconds: Double = 30,
-                             amplitude: Float = 0.15) -> WAVFile {
+    public static func sweep(
+        sampleRate: Int = 48000, seconds: Double = 30,
+        amplitude: Float = 0.15
+    ) -> WAVFile {
         let frames = Int(Double(sampleRate) * seconds)
         var samples = [Float](repeating: 0, count: frames * 2)
-        let low: Float = 100, high: Float = 8000
+        let low: Float = 100
+        let high: Float = 8000
         var phase: Float = 0
         for i in 0..<frames {
             let t = Float(i) / Float(frames)

@@ -53,7 +53,8 @@ public final class MediaChannel: @unchecked Sendable {
     /// What the socket actually got: the kernel adjusts `SO_SNDBUF` and may ignore
     /// `SO_SNDLOWAT`, and that decides how many packets can wait at once.
     public var socketBuffers: (send: Int, lowWater: Int) {
-        var send: Int32 = 0, low: Int32 = 0
+        var send: Int32 = 0
+        var low: Int32 = 0
         var size = socklen_t(MemoryLayout<Int32>.size)
         getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send, &size)
         size = socklen_t(MemoryLayout<Int32>.size)

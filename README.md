@@ -66,7 +66,7 @@ Requirements: Xcode Command Line Tools (Swift 6). Full Xcode is not needed.
 ```sh
 git clone --recurse-submodules https://github.com/PaoloAlbano/CodecBlue.git
 cd CodecBlue
-make test                          # build + the unit tests (what CI runs)
+make check                         # format + lint + build + tests (what CI runs)
 .build/debug/codecblue version
 .build/debug/codecblue lookup AA:BB:CC:DD:EE:FF   # what bluetoothd knows about your headphones
 .build/debug/codecblue probe  AA:BB:CC:DD:EE:FF   # list the codecs they support (takes them for a few seconds)
@@ -164,7 +164,7 @@ worse. Testing a link with such a file tests the file. This cost a day.
 | `scripts/build-driver.sh` | Builds the driver, and installs or removes it with `--install` / `--uninstall` |
 | `scripts/build-menu-app.sh` | Assembles `CodecBlueMenu.app` (a bundle is needed for `LSUIElement`) |
 | `scripts/install.sh` | Installs all three pieces, or removes them with `--uninstall` |
-| `Makefile` | `make test` builds and runs the self-test — the same command CI runs |
+| `Makefile` | `make check` is the gate CI runs; `make format` rewrites the sources |
 | `notes/findings/` | What was measured and what it proved, including the dead ends |
 | `third_party/libldac/` | AOSP libldac (git submodule, unmodified) |
 

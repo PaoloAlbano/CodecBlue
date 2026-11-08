@@ -37,8 +37,10 @@ public final class ControlServer: @unchecked Sendable {
     /// Answers a command. Returns the reply lines; an empty array means "nothing to say".
     private let handler: @Sendable (Command) -> [String]
 
-    public init(path: String = ControlServer.defaultPath,
-                handler: @escaping @Sendable (Command) -> [String]) {
+    public init(
+        path: String = ControlServer.defaultPath,
+        handler: @escaping @Sendable (Command) -> [String]
+    ) {
         self.path = path
         self.handler = handler
     }
@@ -106,8 +108,9 @@ public final class ControlServer: @unchecked Sendable {
         let text = String(decoding: buffer[0..<count], as: UTF8.self)
         let line = text.split(separator: "\n").first.map(String.init) ?? ""
         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
-        let command = Command(name: parts.first?.lowercased() ?? "",
-                              argument: parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : nil)
+        let command = Command(
+            name: parts.first?.lowercased() ?? "",
+            argument: parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : nil)
         let reply = handler(command)
         guard !reply.isEmpty else { return }
         let out = reply.joined(separator: "\n") + "\n"

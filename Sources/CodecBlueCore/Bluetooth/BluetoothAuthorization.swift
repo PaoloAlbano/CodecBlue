@@ -69,8 +69,9 @@ public final class BluetoothAuthorization: NSObject, CBCentralManagerDelegate, @
         case .poweredOn:
             log("bluetooth permission: granted")
         case .unauthorized:
-            log("bluetooth permission: REFUSED. Grant it in System Settings > Privacy & Security > "
-                + "Bluetooth, or the stream cannot take the link over.")
+            log(
+                "bluetooth permission: REFUSED. Grant it in System Settings > Privacy & Security > "
+                    + "Bluetooth, or the stream cannot take the link over.")
         case .unsupported:
             log("bluetooth permission: this Mac reports no Bluetooth")
         case .poweredOff:

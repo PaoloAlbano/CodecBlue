@@ -53,11 +53,11 @@ public final class LDACEncoder {
     /// Whether a given build honours them is a separate question, so `LDACEncoder.levels()`
     /// asks rather than assumes; this enum is only the list of values to ask about.
     public enum Level: Int32, Sendable, CaseIterable {
-        case hq = 0        // EQMID 0
-        case sq = 1        // EQMID 1
-        case mq = 2        // EQMID 2
-        case middle = 3    // EQMID 3 — undocumented in the header, 492 kbps at 96 kHz
-        case low = 4       // EQMID 4 — undocumented in the header, 396 kbps at 96 kHz
+        case hq = 0  // EQMID 0
+        case sq = 1  // EQMID 1
+        case mq = 2  // EQMID 2
+        case middle = 3  // EQMID 3 — undocumented in the header, 492 kbps at 96 kHz
+        case low = 4  // EQMID 4 — undocumented in the header, 396 kbps at 96 kHz
 
         public var name: String {
             switch self {
@@ -75,10 +75,13 @@ public final class LDACEncoder {
     }
 
     /// Initialises with a raw EQMID, for the levels `Quality` does not name.
-    public convenience init(sampleRate: Int, level: Level, mtu: Int,
-                            channelMode: UInt8 = 0x01) throws {
-        try self.init(sampleRate: sampleRate, eqmid: level.rawValue, mtu: mtu,
-                      channelMode: channelMode)
+    public convenience init(
+        sampleRate: Int, level: Level, mtu: Int,
+        channelMode: UInt8 = 0x01
+    ) throws {
+        try self.init(
+            sampleRate: sampleRate, eqmid: level.rawValue, mtu: mtu,
+            channelMode: channelMode)
     }
 
     public struct Output {
@@ -94,7 +97,11 @@ public final class LDACEncoder {
     private let handle: HANDLE_LDAC_BT
     private var stream = [UInt8](repeating: 0, count: 1024)  // LDACBT_MAX_NBYTES
 
-    public enum EncoderError: Error { case unavailable, initFailed(Int32), encodeFailed(Int32) }
+    public enum EncoderError: Error {
+        case unavailable
+        case initFailed(Int32)
+        case encodeFailed(Int32)
+    }
 
     /// - Parameters:
     ///   - mtu: the **media channel MTU** (RTP header included). libldac subtracts its own
@@ -105,10 +112,13 @@ public final class LDACEncoder {
     /// `LDACBT_MTU_REQUIRED`, the 2-DH5 payload size. A smaller `--media-mtu` is clamped.
     public static let minimumMTU = 679
 
-    public convenience init(sampleRate: Int, quality: Quality, mtu: Int,
-                            channelMode: UInt8 = 0x01) throws {
-        try self.init(sampleRate: sampleRate, eqmid: quality.rawValue, mtu: mtu,
-                      channelMode: channelMode)
+    public convenience init(
+        sampleRate: Int, quality: Quality, mtu: Int,
+        channelMode: UInt8 = 0x01
+    ) throws {
+        try self.init(
+            sampleRate: sampleRate, eqmid: quality.rawValue, mtu: mtu,
+            channelMode: channelMode)
     }
 
     public init(sampleRate: Int, eqmid: Int32, mtu: Int, channelMode: UInt8 = 0x01) throws {
@@ -150,8 +160,9 @@ public final class LDACEncoder {
             ldacBT_close_handle(handle)
             ldacBT_free_handle(handle)
         }
-        let status = ldacBT_init_handle_encode(handle, 679, 0x7F, LDAC_CCI_STEREO,
-                                               LDACBT_SMPL_FMT_F32, 48000)
+        let status = ldacBT_init_handle_encode(
+            handle, 679, 0x7F, LDAC_CCI_STEREO,
+            LDACBT_SMPL_FMT_F32, 48000)
         return status == 0
     }
 
@@ -292,7 +303,11 @@ public final class LDACEncoder {
         for _ in 0..<4 {
             let now = rung
             if now == target { return }
-            if now < target { guard stepDown() else { return } } else { guard stepUp() else { return } }
+            if now < target {
+                guard stepDown() else { return }
+            } else {
+                guard stepUp() else { return }
+            }
         }
     }
 
@@ -303,8 +318,9 @@ public final class LDACEncoder {
         var frames: Int32 = 0
         let status: Int32 = stream.withUnsafeMutableBufferPointer { out in
             if let pcm {
-                return ldacBT_encode(handle, UnsafeMutableRawPointer(mutating: pcm.baseAddress), &used,
-                                     out.baseAddress, &written, &frames)
+                return ldacBT_encode(
+                    handle, UnsafeMutableRawPointer(mutating: pcm.baseAddress), &used,
+                    out.baseAddress, &written, &frames)
             }
             return ldacBT_encode(handle, nil, &used, out.baseAddress, &written, &frames)
         }
@@ -321,7 +337,8 @@ extension LDAC {
     }
 
     public static func rates(fromBits bits: UInt8) -> [Int] {
-        [(0x20, 44100), (0x10, 48000), (0x08, 88200), (0x04, 96000)].filter { bits & $0.0 != 0 }.map(\.1)
+        [(0x20, 44100), (0x10, 48000), (0x08, 88200), (0x04, 96000)].filter { bits & $0.0 != 0 }
+            .map(\.1)
     }
 
     /// Codec information for SET_CONFIGURATION: one rate, stereo.

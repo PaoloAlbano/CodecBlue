@@ -62,9 +62,11 @@ public struct BitrateAdapter {
     /// flips every window sounds worse than a steady lower one.
     public let minimumInterval: TimeInterval
 
-    public init(dropLimit: Double = 0.02, queueLimit: Double = 0.75, upAfter: Int = 3,
-                minimumInterval: TimeInterval = 4, backoff: TimeInterval = 30,
-                ceilingRung: Int = 0, upDwell: TimeInterval = 20) {
+    public init(
+        dropLimit: Double = 0.02, queueLimit: Double = 0.75, upAfter: Int = 3,
+        minimumInterval: TimeInterval = 4, backoff: TimeInterval = 30,
+        ceilingRung: Int = 0, upDwell: TimeInterval = 20
+    ) {
         self.dropLimit = dropLimit
         self.queueLimit = queueLimit
         self.upAfter = upAfter
@@ -80,8 +82,10 @@ public struct BitrateAdapter {
     ///   - dropped: fraction of the window's audio thrown away, 0…1.
     ///   - queueFill: queue duration as a fraction of its budget, 0…1.
     ///   - now: the window's timestamp, for the minimum interval.
-    public mutating func decide(current: Int, dropped: Double, queueFill: Double,
-                                now: Date = Date()) -> Decision {
+    public mutating func decide(
+        current: Int, dropped: Double, queueFill: Double,
+        now: Date = Date()
+    ) -> Decision {
         if dropped > dropLimit || queueFill >= queueLimit {
             cleanWindows = 0
             guard now.timeIntervalSince(lastChange) >= minimumInterval else { return .hold }
@@ -96,8 +100,8 @@ public struct BitrateAdapter {
         }
         cleanWindows += 1
         guard cleanWindows >= upAfter,
-              now.timeIntervalSince(lastChange) >= minimumInterval,
-              now.timeIntervalSince(lastChange) >= upDwell
+            now.timeIntervalSince(lastChange) >= minimumInterval,
+            now.timeIntervalSince(lastChange) >= upDwell
         else { return .hold }
         let higher = current - 1
         guard higher >= 0, higher >= ceilingRung else {

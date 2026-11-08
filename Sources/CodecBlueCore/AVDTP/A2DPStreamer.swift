@@ -19,14 +19,16 @@ public final class A2DPStreamer: @unchecked Sendable {
     }
 
     public enum StreamError: Error, CustomStringConvertible {
-        case noLDAC([String]), unsupportedRate(Int, [Int])
+        case noLDAC([String])
+        case unsupportedRate(Int, [Int])
         public var description: String {
             switch self {
-            case let .noLDAC(codecs):
+            case .noLDAC(let codecs):
                 "the headphones offer no LDAC endpoint (they offer: \(codecs.joined(separator: ", "))). "
-                + "LDAC has to be enabled in the headphones' own app, and not every pair supports it: "
-                + "if these do not, this program cannot drive them — SBC and AAC are not implemented."
-            case let .unsupportedRate(rate, rates): "the headphones do not take \(rate) Hz in LDAC (they take \(rates))"
+                    + "LDAC has to be enabled in the headphones' own app, and not every pair supports it: "
+                    + "if these do not, this program cannot drive them — SBC and AAC are not implemented."
+            case .unsupportedRate(let rate, let rates):
+                "the headphones do not take \(rate) Hz in LDAC (they take \(rates))"
             }
         }
     }
@@ -260,7 +262,10 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// Delay the headphones report (AVDTP delay reporting), for the latency figure.
     private var reportedDelay: TimeInterval = 0
 
-    public init(takeover: HeadsetTakeover, signaling: SignalingChannel, log: @escaping @Sendable (String) -> Void) {
+    public init(
+        takeover: HeadsetTakeover, signaling: SignalingChannel,
+        log: @escaping @Sendable (String) -> Void
+    ) {
         self.takeover = takeover
         self.signaling = signaling
         self.log = log
@@ -276,42 +281,47 @@ public final class A2DPStreamer: @unchecked Sendable {
         // Hold AVRCP before the media channel: some headphones refuse it afterwards (Bathys,
         // per Blue Bloom), and holding it keeps macOS from reconnecting its profiles.
         if holdAVRCP {
-        do {
-            let channel = try await takeover.openChannel(psm: AVCTPHolder.psm, label: "avrcp", timeout: 3)
-            let holder = AVCTPHolder(socket: ChannelSocket(channel: channel, label: "avrcp"))
-            // Byte-level tracing of the control channel, off unless asked for. It was on while
-            // the AVRCP frames were being got right, and it is the only reason the malformed
-            // frames were ever found — but it writes a line every two seconds forever, which
-            // buries everything else in the log. `CODECBLUE_AVRCP_TRACE=1` brings it back.
-            if ProcessInfo.processInfo.environment["CODECBLUE_AVRCP_TRACE"] == "1" {
-                holder.onRaw = { [log] bytes in
-                    let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-                    log("AVRCP \(bytes.first == 0xFF ? "out" : "in"): \(hex)")
+            do {
+                let channel = try await takeover.openChannel(
+                    psm: AVCTPHolder.psm, label: "avrcp", timeout: 3)
+                let holder = AVCTPHolder(socket: ChannelSocket(channel: channel, label: "avrcp"))
+                // Byte-level tracing of the control channel, off unless asked for. It was on while
+                // the AVRCP frames were being got right, and it is the only reason the malformed
+                // frames were ever found — but it writes a line every two seconds forever, which
+                // buries everything else in the log. `CODECBLUE_AVRCP_TRACE=1` brings it back.
+                if ProcessInfo.processInfo.environment["CODECBLUE_AVRCP_TRACE"] == "1" {
+                    holder.onRaw = { [log] bytes in
+                        let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                        log("AVRCP \(bytes.first == 0xFF ? "out" : "in"): \(hex)")
+                    }
                 }
+                holder.registerVolumeNotifications()
+                holder.onAbsoluteVolume = { [log, weak self] value in
+                    log(String(format: "headphone volume: absolute %.0f%%", value * 100))
+                    self?.onAbsoluteVolume?(value)
+                }
+                holder.onKey = { [log, weak self] key in
+                    log("headphone button: \(key)")
+                    return self?.onKey?(key) ?? false
+                }
+                avrcp = holder
+                log("AVRCP channel held")
+            } catch {
+                log("AVRCP channel not available (\(error)); continuing")
             }
-            holder.registerVolumeNotifications()
-            holder.onAbsoluteVolume = { [log, weak self] value in
-                log(String(format: "headphone volume: absolute %.0f%%", value * 100))
-                self?.onAbsoluteVolume?(value)
-            }
-            holder.onKey = { [log, weak self] key in
-                log("headphone button: \(key)")
-                return self?.onKey?(key) ?? false
-            }
-            avrcp = holder
-            log("AVRCP channel held")
-        } catch {
-            log("AVRCP channel not available (\(error)); continuing")
-        }
         }
 
         // Hold hands-free too, so macOS cannot publish a call device whose use would open a
         // SCO link and starve the stream.
         if holdHandsFree,
-           let channel = takeover.record?.services.first(where: { $0.uuid16 == HandsFreeHolder.handsFreeServiceUUID })?.rfcomm,
-           channel > 0 {
+            let channel = takeover.record?.services.first(where: {
+                $0.uuid16 == HandsFreeHolder.handsFreeServiceUUID
+            })?.rfcomm,
+            channel > 0
+        {
             do {
-                let opened = try await takeover.openRFCOMM(channel: channel, label: "hfp", timeout: 5)
+                let opened = try await takeover.openRFCOMM(
+                    channel: channel, label: "hfp", timeout: 5)
                 let holder = HandsFreeHolder(socket: ChannelSocket(channel: opened, label: "hfp"))
                 holder.onLog = log
                 holder.onBattery = { [log, weak self] level in
@@ -329,13 +339,19 @@ public final class A2DPStreamer: @unchecked Sendable {
         var offered: [String] = []
         var ldac: (seid: UInt8, rates: [Int], delay: Bool)?
         for endpoint in endpoints where endpoint.isSink && endpoint.mediaType == 0 {
-            guard let reply = try? await signaling.command(.getCapabilities, Data([endpoint.seid << 2])) else { continue }
+            guard
+                let reply = try? await signaling.command(
+                    .getCapabilities, Data([endpoint.seid << 2]))
+            else { continue }
             let caps = AVDTP.parseCapabilities(reply.payload)
             guard let codec = caps.codec else { continue }
             offered.append(codec.name)
             if codec.name == "LDAC", codec.information.count >= 8 {
-                ldac = (endpoint.seid, LDAC.rates(fromBits: codec.information[codec.information.startIndex + 6]),
-                        caps.categories.contains(0x08))
+                ldac = (
+                    endpoint.seid,
+                    LDAC.rates(fromBits: codec.information[codec.information.startIndex + 6]),
+                    caps.categories.contains(0x08)
+                )
             }
         }
         guard let ldac else { throw StreamError.noLDAC(offered) }
@@ -343,30 +359,39 @@ public final class A2DPStreamer: @unchecked Sendable {
         // takes 44.1 kHz is still a device we can drive. Falling back here is what makes this
         // work with headphones other than the ones it was developed on.
         let requested = sampleRate
-        guard let chosen = requested.map({ ldac.rates.contains($0) ? $0 : nil })
+        guard
+            let chosen = requested.map({ ldac.rates.contains($0) ? $0 : nil })
                 ?? ldac.rates.first,
-              let info = LDAC.configuration(rate: chosen)
+            let info = LDAC.configuration(rate: chosen)
         else {
             throw StreamError.unsupportedRate(requested ?? 0, ldac.rates)
         }
         if let requested, requested != chosen {
-            log("the headphones do not take \(requested) Hz in LDAC: using \(chosen) Hz instead "
-                + "(they offer \(ldac.rates))")
+            log(
+                "the headphones do not take \(requested) Hz in LDAC: using \(chosen) Hz instead "
+                    + "(they offer \(ldac.rates))")
         }
         let rate = chosen
 
-        var payload = Data([ldac.seid << 2, Self.localSEID << 2, 0x01, 0x00, 0x07, UInt8(2 + info.count), 0x00, 0xFF])
+        var payload = Data([
+            ldac.seid << 2, Self.localSEID << 2, 0x01, 0x00, 0x07, UInt8(2 + info.count), 0x00,
+            0xFF,
+        ])
         payload.append(info)
         if ldac.delay { payload.append(contentsOf: [0x08, 0x00]) }
         _ = try await signaling.command(.setConfiguration, payload)
-        log("configured LDAC \(rate) Hz stereo on SEID \(ldac.seid)\(ldac.delay ? " (delay reporting)" : "")")
+        log(
+            "configured LDAC \(rate) Hz stereo on SEID \(ldac.seid)\(ldac.delay ? " (delay reporting)" : "")"
+        )
 
         _ = try await signaling.command(.open, Data([ldac.seid << 2]))
-        let channel = try await takeover.openChannel(psm: AVDTP.psm, label: "media", priority: mediaPriority, timeout: 10)
+        let channel = try await takeover.openChannel(
+            psm: AVDTP.psm, label: "media", priority: mediaPriority, timeout: 10)
         media = MediaChannel(channel: channel, mtu: mediaMTU, sendBufferPackets: sendBufferPackets)
         let buffers = media!.socketBuffers
-        log("media channel open (link MTU \(channel.outMTU), using \(media!.mtu), \(media!.socketTypeName), "
-            + "socket send buffer \(buffers.send), low water \(buffers.lowWater))")
+        log(
+            "media channel open (link MTU \(channel.outMTU), using \(media!.mtu), \(media!.socketTypeName), "
+                + "socket send buffer \(buffers.send), low water \(buffers.lowWater))")
         _ = try await signaling.command(.start, Data([ldac.seid << 2]))
         log("stream started")
         // The link quality mode is asked for again here, and this is the moment that matters.
@@ -396,15 +421,16 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// file. `pull` is asked for `frames` stereo frames and returns what it has; an empty array
     /// means "nothing yet", which is silence, not the end of the stream.
     public func play(pulling pull: @escaping (Int) -> [Float]) throws {
-        try playLoop(feed: { frames in
-            let pulled = pull(frames)
-            // An empty read is not silence to be sent: it means the writer has not produced this
-            // audio yet. Padding it with zeros puts a gap in the stream — a click — and it is
-            // what makes the cushion useless, because the cushion can only absorb a stall if the
-            // audio is *held back*, not replaced. Returning nothing makes the loop wait for the
-            // writer instead, which is exactly the behaviour a cushion needs.
-            return pulled
-        }, endless: true)
+        try playLoop(
+            feed: { frames in
+                let pulled = pull(frames)
+                // An empty read is not silence to be sent: it means the writer has not produced this
+                // audio yet. Padding it with zeros puts a gap in the stream — a click — and it is
+                // what makes the cushion useless, because the cushion can only absorb a stall if the
+                // audio is *held back*, not replaced. Returning nothing makes the loop wait for the
+                // writer instead, which is exactly the behaviour a cushion needs.
+                return pulled
+            }, endless: true)
     }
 
     public func play(_ samples: [Float]) throws {
@@ -413,13 +439,14 @@ public final class A2DPStreamer: @unchecked Sendable {
         // forever and made the length probe (`feed(0).count`) zero — so `play` of a file sent
         // nothing at all and returned in 3 ms.
         var position = 0
-        try playLoop(feed: { frames in
-            let wanted = min(frames * 2, samples.count - position)
-            guard wanted > 0 else { return [] }
-            let chunk = Array(samples[position..<(position + wanted)])
-            position += wanted
-            return chunk
-        }, endless: false, totalFrames: samples.count / 2)
+        try playLoop(
+            feed: { frames in
+                let wanted = min(frames * 2, samples.count - position)
+                guard wanted > 0 else { return [] }
+                let chunk = Array(samples[position..<(position + wanted)])
+                position += wanted
+                return chunk
+            }, endless: false, totalFrames: samples.count / 2)
     }
 
     private func playLoop(feed: (Int) -> [Float], endless: Bool, totalFrames: Int? = nil) throws {
@@ -430,15 +457,17 @@ public final class A2DPStreamer: @unchecked Sendable {
         // Start on the rung the listener asked for, then step to it: `ldacBT_set_eqmid` refuses the
         // two undocumented rungs, and stepping is also how the encoder keeps its frame length
         // consistent with the packet type.
-        let encoder = try LDACEncoder(sampleRate: configuration.sampleRate, level: .hq,
-                                      mtu: min(configuration.mtu, 1024))
+        let encoder = try LDACEncoder(
+            sampleRate: configuration.sampleRate, level: .hq,
+            mtu: min(configuration.mtu, 1024))
         encoder.move(toRung: configuration.rung)
         let rate = configuration.sampleRate
         let block = LDACEncoder.framesPerCall
         // Consecutive windows with no stall at all, needed before the queue narrows again.
         var cleanWindows = 0
-        var queue = PacketQueue(sampleRate: rate, floorDuration: queueDuration,
-                                ceilingDuration: max(queueCeiling, queueDuration))
+        var queue = PacketQueue(
+            sampleRate: rate, floorDuration: queueDuration,
+            ceilingDuration: max(queueCeiling, queueDuration))
         var meter = LinkMeter()
         var stats = StreamStatistics()
         // `--quality` is the ceiling: asking for MQ means "MQ is as good as I want", so the
@@ -534,7 +563,8 @@ public final class A2DPStreamer: @unchecked Sendable {
                 var ramp = [Float](repeating: 0, count: block * 2)
                 for i in 0..<block {
                     let position = done + i
-                    let g = position >= fadeFrames
+                    let g =
+                        position >= fadeFrames
                         ? 0
                         : 1 - Float(position) / Float(fadeFrames)
                     ramp[i * 2] = fadeFrom.0 * g
@@ -542,12 +572,15 @@ public final class A2DPStreamer: @unchecked Sendable {
                 }
                 fadeRemaining = max(0, fadeRemaining - block)
                 if let output = try? ramp.withUnsafeBufferPointer({ try encoder.encode($0) }) {
-                    let payload = Data([MediaPacket.ldacHeader(frameCount: output.frameCount)])
+                    let payload =
+                        Data([MediaPacket.ldacHeader(frameCount: output.frameCount)])
                         + output.payload
                     let packetFrames = output.frameCount * encoder.framesPerLDACFrame
-                    queue.append(MediaPacket.rtp(sequence: sequence, timestamp: timestamp, ssrc: 1,
-                                                 payload: payload),
-                                 frames: packetFrames)
+                    queue.append(
+                        MediaPacket.rtp(
+                            sequence: sequence, timestamp: timestamp, ssrc: 1,
+                            payload: payload),
+                        frames: packetFrames)
                     sentFramesTotal += packetFrames
                     sequence &+= 1
                     timestamp &+= UInt32(packetFrames)
@@ -625,7 +658,7 @@ public final class A2DPStreamer: @unchecked Sendable {
             }
 
             // Encode what is due by now, as long as the queue has room for it.
-            var due = min(Int((Double(now - start) / 1e9 + lead) * Double(rate)), total)
+            let due = min(Int((Double(now - start) / 1e9 + lead) * Double(rate)), total)
             // A pause in the *app* is not an AVDTP suspend: the headphones never say anything, so
             // `state.suspended` stays false and the anchor keeps running while the driver stops
             // writing. On resume the encoder then believes the whole pause is due at once.
@@ -656,8 +689,10 @@ public final class A2DPStreamer: @unchecked Sendable {
                 // iteration (position cannot advance while the ring is empty) and the log filled
                 // with one reset every half second.
                 resetWhileIdle = true
-                log(String(format: "source was idle for %.1f s: the clock is reset, not caught up",
-                           behind))
+                log(
+                    String(
+                        format: "source was idle for %.1f s: the clock is reset, not caught up",
+                        behind))
             }
             // Two different reasons can put the encoder behind the clock, and they need opposite
             // answers:
@@ -766,11 +801,15 @@ public final class A2DPStreamer: @unchecked Sendable {
                     for i in 0..<(block * 2) { scratch[i] = driftFifo[i] }
                     driftFifo.removeFirst(block * 2)
                 }
-                guard let output = try scratch.withUnsafeBufferPointer({ try encoder.encode($0) }) else { continue }
-                let payload = Data([MediaPacket.ldacHeader(frameCount: output.frameCount)]) + output.payload
+                guard let output = try scratch.withUnsafeBufferPointer({ try encoder.encode($0) })
+                else { continue }
+                let payload =
+                    Data([MediaPacket.ldacHeader(frameCount: output.frameCount)]) + output.payload
                 let packetFrames = output.frameCount * encoder.framesPerLDACFrame
-                queue.append(MediaPacket.rtp(sequence: sequence, timestamp: timestamp, ssrc: 1, payload: payload),
-                             frames: packetFrames)
+                queue.append(
+                    MediaPacket.rtp(
+                        sequence: sequence, timestamp: timestamp, ssrc: 1, payload: payload),
+                    frames: packetFrames)
                 sentFramesTotal += packetFrames
                 sequence &+= 1
                 timestamp &+= UInt32(packetFrames)
@@ -813,20 +852,24 @@ public final class A2DPStreamer: @unchecked Sendable {
                 // `start` forward on purpose, so using it here would make the bias hide itself
                 // (it read 100.01% while actually delivering 99.99%).
                 let elapsedSinceStart = Double(now - streamAnchor) / 1e9
-                let drift = elapsedSinceStart > 1
+                let drift =
+                    elapsedSinceStart > 1
                     ? Double(sentFramesTotal) / (elapsedSinceStart * Double(encoder.sampleRate))
                     : nil
-                report(stats: &stats, meter: &meter, queue: queue, encoder: encoder,
-                       now: now, lastReport: lastReport,
-                       shortReadsInWindow: shortReads, shortFramesInWindow: shortFrames,
-                       driftFraction: drift)
+                report(
+                    stats: &stats, meter: &meter, queue: queue, encoder: encoder,
+                    now: now, lastReport: lastReport,
+                    shortReadsInWindow: shortReads, shortFramesInWindow: shortFrames,
+                    driftFraction: drift)
                 shortReads = 0
                 shortFrames = 0
                 if needsRoom {
                     cleanWindows = 0
                     if queue.noteStall() {
-                        log(String(format: "cushion: widened to %.0f ms (a %.0f ms stall)",
-                                   queue.maxDuration * 1000, longest * 1000))
+                        log(
+                            String(
+                                format: "cushion: widened to %.0f ms (a %.0f ms stall)",
+                                queue.maxDuration * 1000, longest * 1000))
                         cushionChanged?(queue.maxDuration)
                     }
                 } else if stallSeconds > 0 {
@@ -835,8 +878,10 @@ public final class A2DPStreamer: @unchecked Sendable {
                     cleanWindows += 1
                     if cleanWindows >= 5, queue.relax() {
                         cleanWindows = 0
-                        log(String(format: "cushion: back to %.0f ms after %d clean windows",
-                                   queue.maxDuration * 1000, 5))
+                        log(
+                            String(
+                                format: "cushion: back to %.0f ms after %d clean windows",
+                                queue.maxDuration * 1000, 5))
                         cushionChanged?(queue.maxDuration)
                     }
                 }
@@ -880,7 +925,9 @@ public final class A2DPStreamer: @unchecked Sendable {
                         // Clearing it costs at most the cushion (60 ms) and is over at once;
                         // keeping it costs seconds of distortion.
                         queue.removeAll()
-                        log("quality: set to \(encoder.bitrateKbps) kbps by request (queue cleared)")
+                        log(
+                            "quality: set to \(encoder.bitrateKbps) kbps by request (queue cleared)"
+                        )
                     }
                 }
                 // Settle on what the link can carry, whether or not the adapter is on.
@@ -898,11 +945,13 @@ public final class A2DPStreamer: @unchecked Sendable {
                 // this only ever moves down. Comparing against it was the first version's bug —
                 // `HQ < HQ` is false, so the rule never fired at the one level that needed it.
                 if dropped > 0.02 {
-                    let fittedRung = BitrateAdapter.fitRung(capacityKbps: carriedKbps,
-                                                            sampleRate: encoder.sampleRate)
+                    let fittedRung = BitrateAdapter.fitRung(
+                        capacityKbps: carriedKbps,
+                        sampleRate: encoder.sampleRate)
                     if fittedRung > encoder.rung {
-                        let abandoned = LDACEncoder.name(rung: encoder.rung,
-                                                         sampleRate: encoder.sampleRate)
+                        let abandoned = LDACEncoder.name(
+                            rung: encoder.rung,
+                            sampleRate: encoder.sampleRate)
                         // Tell the adapter, or it climbs straight back into the rung that just
                         // failed: see `noteTooHigh`.
                         adapter.noteTooHigh(encoder.rung)
@@ -920,20 +969,25 @@ public final class A2DPStreamer: @unchecked Sendable {
                         // The queue holds packets encoded at the old rung, and they are both
                         // stale and the wrong shape: see the note in the request block above.
                         queue.removeAll()
-                        log(String(format: "quality: LDAC %@ does not fit this link "
-                                   + "(%.0f kbps carried, %.0f%% dropped): settled on %d kbps",
-                                   abandoned, carriedKbps, dropped * 100, encoder.bitrateKbps))
+                        log(
+                            String(
+                                format: "quality: LDAC %@ does not fit this link "
+                                    + "(%.0f kbps carried, %.0f%% dropped): settled on %d kbps",
+                                abandoned, carriedKbps, dropped * 100, encoder.bitrateKbps))
                     }
                 }
                 if adaptBitrate {
-                    switch adapter.decide(current: encoder.rung, dropped: dropped, queueFill: fill) {
+                    switch adapter.decide(current: encoder.rung, dropped: dropped, queueFill: fill)
+                    {
                     case .hold:
                         break
-                    case let .down(rung):
+                    case .down(let rung):
                         encoder.move(toRung: rung)
-                        log(String(format: "bitrate: down to %d kbps (%.0f%% dropped, queue %.0f%%)",
-                                   encoder.bitrateKbps, dropped * 100, fill * 100))
-                    case let .up(rung):
+                        log(
+                            String(
+                                format: "bitrate: down to %d kbps (%.0f%% dropped, queue %.0f%%)",
+                                encoder.bitrateKbps, dropped * 100, fill * 100))
+                    case .up(let rung):
                         encoder.move(toRung: rung)
                         log("bitrate: up to \(encoder.bitrateKbps) kbps (the link has been clean)")
                     }
@@ -948,7 +1002,9 @@ public final class A2DPStreamer: @unchecked Sendable {
             if position >= total {
                 if queue.isEmpty { break }
                 if now &- lastProgress >= UInt64(2e9) {
-                    log("the socket stopped taking the last packets: dropping \(queue.count) and stopping")
+                    log(
+                        "the socket stopped taking the last packets: dropping \(queue.count) and stopping"
+                    )
                     queue.removeAll()
                     break
                 }
@@ -966,30 +1022,40 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// * `dropped` is the audio that had to be thrown away to keep the delay bounded.
     /// * `full` is how often and how long the socket refused a packet: a link that stalls and
     ///   then catches up looks different from one that is uniformly slow.
-    private func report(stats: inout StreamStatistics, meter: inout LinkMeter, queue: PacketQueue,
-                        encoder: LDACEncoder, now: UInt64, lastReport: UInt64,
-                        shortReadsInWindow: Int = 0, shortFramesInWindow: Int = 0,
-                        driftFraction: Double? = nil) {
+    private func report(
+        stats: inout StreamStatistics, meter: inout LinkMeter, queue: PacketQueue,
+        encoder: LDACEncoder, now: UInt64, lastReport: UInt64,
+        shortReadsInWindow: Int = 0, shortFramesInWindow: Int = 0,
+        driftFraction: Double? = nil
+    ) {
         let window = max(Double(now - lastReport) / 1e9, 0.001)
         let accepted = meter.takeFraction(sampleRate: encoder.sampleRate, window: window)
         var line = String(
-            format: "streaming: %.0f kbps out, %.0f packets/s, link took %.0f%% of real time (codec %@ %d kbps)",
+            format:
+                "streaming: %.0f kbps out, %.0f packets/s, link took %.0f%% of real time (codec %@ %d kbps)",
             stats.sentKbps(window: window), stats.packetsPerSecond(window: window),
             accepted * 100, encoder.quality.name, encoder.bitrateKbps
         )
         line += String(format: ", queue %.0f ms", queue.queuedDuration * 1000)
         if stats.droppedFrames > 0 {
-            line += String(format: ", dropped %.0f%%", stats.droppedFraction(sampleRate: encoder.sampleRate, window: window) * 100)
+            line += String(
+                format: ", dropped %.0f%%",
+                stats.droppedFraction(sampleRate: encoder.sampleRate, window: window) * 100)
         }
         if meter.stalls > 0 {
-            line += String(format: ", socket full %d times (%.0f ms, longest %.0f ms), at most %d packet(s) per drain",
-                           meter.stalls, meter.stallSeconds * 1000, meter.longestStall * 1000, meter.longestBurst)
+            line += String(
+                format:
+                    ", socket full %d times (%.0f ms, longest %.0f ms), at most %d packet(s) per drain",
+                meter.stalls, meter.stallSeconds * 1000, meter.longestStall * 1000,
+                meter.longestBurst)
         }
         if let rtt = avrcp?.roundTrip {
             line += String(format: ", AVRCP round trip %.0f ms", rtt * 1000)
             avrcp?.measureRoundTrip()
         }
-        if reportedDelay > 0 { line += String(format: ", headphones' delay %.0f ms", reportedDelay * 1000) }
+        if reportedDelay > 0 {
+            line += String(format: ", headphones' delay %.0f ms", reportedDelay * 1000)
+        }
         // Cumulative drift: audio sent against real time since the stream started. Above 100%
         // the headphones are being fed faster than they play, so their buffer grows and the
         // sound falls further behind the picture — the one failure a per-window report cannot
@@ -998,15 +1064,20 @@ public final class A2DPStreamer: @unchecked Sendable {
             line += String(format: ", sent %.2f%% of real time since start", drift * 100)
         }
         if shortReadsInWindow > 0 {
-            line += String(format: ", %d short read(s) (%d frames held: the writer is behind)",
-                           shortReadsInWindow, shortFramesInWindow)
+            line += String(
+                format: ", %d short read(s) (%d frames held: the writer is behind)",
+                shortReadsInWindow, shortFramesInWindow)
         }
         log(line)
         if stats.linkIsTheBottleneck {
-            log("the link takes less audio than the codec produces: this is the Bluetooth link, not the encoder.")
+            log(
+                "the link takes less audio than the codec produces: this is the Bluetooth link, not the encoder."
+            )
         }
         let systemDevices = SystemHeadphoneAudio.devices(address: takeover.address)
-        if !systemDevices.isEmpty { log("macOS audio devices for the headphones: \(systemDevices)") }
+        if !systemDevices.isEmpty {
+            log("macOS audio devices for the headphones: \(systemDevices)")
+        }
         stats = StreamStatistics()
         meter.resetStalls()
     }
@@ -1017,20 +1088,31 @@ public final class A2DPStreamer: @unchecked Sendable {
     public func pace(seconds: TimeInterval, packetSize: Int, packetsPerSecond: Double) {
         guard let media else { return }
         let size = min(max(64, packetSize), media.mtu)
-        let payload = Data([MediaPacket.ldacHeader(frameCount: 3)]) + Data(repeating: 0xAA, count: size - 13)
+        let payload =
+            Data([MediaPacket.ldacHeader(frameCount: 3)]) + Data(repeating: 0xAA, count: size - 13)
         let interval = 1.0 / packetsPerSecond
         let start = DispatchTime.now().uptimeNanoseconds
         var sequence: UInt16 = 0
-        var sent = 0, refused = 0, bytes = 0
-        var lastReport = start, lastSent = 0, lastRefused = 0
-        log(String(format: "pace: %d-byte packets at %.0f/s (%.0f kbps offered) for %.0f s",
-                   size, packetsPerSecond, Double(size) * packetsPerSecond * 8 / 1000, seconds))
+        var sent = 0
+        var refused = 0
+        var bytes = 0
+        var lastReport = start
+        var lastSent = 0
+        var lastRefused = 0
+        log(
+            String(
+                format: "pace: %d-byte packets at %.0f/s (%.0f kbps offered) for %.0f s",
+                size, packetsPerSecond, Double(size) * packetsPerSecond * 8 / 1000, seconds))
         var due = start
         while !state.stopped, Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9 < seconds {
             let now = DispatchTime.now().uptimeNanoseconds
-            if now < due { usleep(200); continue }
+            if now < due {
+                usleep(200)
+                continue
+            }
             due = due &+ UInt64(interval * 1e9)
-            let packet = MediaPacket.rtp(sequence: sequence, timestamp: UInt32(sequence) * 384, ssrc: 1, payload: payload)
+            let packet = MediaPacket.rtp(
+                sequence: sequence, timestamp: UInt32(sequence) * 384, ssrc: 1, payload: payload)
             switch media.send(packet) {
             case .sent:
                 sequence &+= 1
@@ -1044,25 +1126,30 @@ public final class A2DPStreamer: @unchecked Sendable {
             }
             if Double(now - lastReport) / 1e9 >= 1 {
                 let window = Double(now - lastReport) / 1e9
-                log(String(format: "pace: took %.0f/s, refused %.0f/s (%.0f kbps out)",
-                           Double(sent - lastSent) / window, Double(refused - lastRefused) / window,
-                           Double(bytes) * 8 / Double(now - start) / 1e6))
+                log(
+                    String(
+                        format: "pace: took %.0f/s, refused %.0f/s (%.0f kbps out)",
+                        Double(sent - lastSent) / window, Double(refused - lastRefused) / window,
+                        Double(bytes) * 8 / Double(now - start) / 1e6))
                 lastReport = now
                 lastSent = sent
                 lastRefused = refused
             }
         }
         let total = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
-        log(String(format: "pace: offered %.0f/s, took %.0f/s, refused %.0f/s = %.0f kbps",
-                   packetsPerSecond, Double(sent) / total, Double(refused) / total,
-                   Double(bytes) * 8 / total / 1000))
+        log(
+            String(
+                format: "pace: offered %.0f/s, took %.0f/s, refused %.0f/s = %.0f kbps",
+                packetsPerSecond, Double(sent) / total, Double(refused) / total,
+                Double(bytes) * 8 / total / 1000))
     }
 
     public func flood(seconds: TimeInterval, packetSize: Int) {
         guard let media else { return }
         // No LDAC here, so no libldac minimum: any size the media MTU allows.
         let size = min(max(64, packetSize), media.mtu)
-        let payload = Data([MediaPacket.ldacHeader(frameCount: 3)]) + Data(repeating: 0xAA, count: size - 13)
+        let payload =
+            Data([MediaPacket.ldacHeader(frameCount: 3)]) + Data(repeating: 0xAA, count: size - 13)
         let start = DispatchTime.now().uptimeNanoseconds
         var sequence: UInt16 = 0
         var sent = 0
@@ -1073,7 +1160,8 @@ public final class A2DPStreamer: @unchecked Sendable {
         var lastBytes = 0
         log("flood: \(size)-byte packets for \(Int(seconds)) s, as fast as the socket takes them")
         while !state.stopped, Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9 < seconds {
-            let packet = MediaPacket.rtp(sequence: sequence, timestamp: UInt32(sequence) * 384, ssrc: 1, payload: payload)
+            let packet = MediaPacket.rtp(
+                sequence: sequence, timestamp: UInt32(sequence) * 384, ssrc: 1, payload: payload)
             switch media.send(packet) {
             case .sent:
                 sequence &+= 1
@@ -1093,16 +1181,20 @@ public final class A2DPStreamer: @unchecked Sendable {
                 // Per window, not cumulative: the cumulative figure hides a link that has
                 // stalled, and dividing nanoseconds by 1e6 printed a flat 0.
                 let kbps = Double(bytes - lastBytes) * 8 / window / 1000
-                log(String(format: "flood: %.0f packets/s, %.0f kbps, %d refused so far", perSecond,
-                           kbps, refused))
+                log(
+                    String(
+                        format: "flood: %.0f packets/s, %.0f kbps, %d refused so far", perSecond,
+                        kbps, refused))
                 lastReport = now
                 lastSent = sent
                 lastBytes = bytes
             }
         }
         let total = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
-        log(String(format: "flood: %d packets in %.1f s = %.0f packets/s, %.0f kbps, %d refused",
-                   sent, total, Double(sent) / total, Double(bytes) * 8 / total / 1000, refused))
+        log(
+            String(
+                format: "flood: %d packets in %.1f s = %.0f packets/s, %.0f kbps, %d refused",
+                sent, total, Double(sent) / total, Double(bytes) * 8 / total / 1000, refused))
     }
 
     public func stop() { state.stopped = true }
@@ -1148,11 +1240,13 @@ public final class A2DPStreamer: @unchecked Sendable {
         let log = self.log
         Task.detached {
             do {
-                let channel = try await takeover.openChannel(psm: AVDTP.psm, label: "media",
-                                                             priority: 63, timeout: 10)
+                let channel = try await takeover.openChannel(
+                    psm: AVDTP.psm, label: "media",
+                    priority: 63, timeout: 10)
                 await MainActor.run {
-                    result.channel = MediaChannel(channel: channel, mtu: mtu,
-                                                  sendBufferPackets: packets)
+                    result.channel = MediaChannel(
+                        channel: channel, mtu: mtu,
+                        sendBufferPackets: packets)
                 }
                 _ = try await signaling.command(.start, Data([seid << 2]))
                 result.opened = true
@@ -1193,7 +1287,8 @@ public final class A2DPStreamer: @unchecked Sendable {
             signaling.reply(to: message, accept: true)
         case .discover:
             // Our single source endpoint: SEID 1, in use, audio source.
-            signaling.reply(to: message, accept: true, payload: Data([Self.localSEID << 2 | 0x02, 0x00]))
+            signaling.reply(
+                to: message, accept: true, payload: Data([Self.localSEID << 2 | 0x02, 0x00]))
         default:
             signaling.reply(to: message, accept: false, payload: Data([0x13]))  // not supported
         }

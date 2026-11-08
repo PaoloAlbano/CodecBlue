@@ -65,8 +65,10 @@ public final class AVCTPHolder: @unchecked Sendable {
         // Every vendor dependent PDU carries a two-byte parameter length after a reserved byte.
         // Without it the headphones read the volume as the length and answered REJECTED — the
         // frame was `50 26`, and the correct one is `50 00 00 01 26`.
-        var packet: [UInt8] = [0x00, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
-                               0x50, 0x00, 0x00, 0x01, operand]
+        var packet: [UInt8] = [
+            0x00, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x50, 0x00, 0x00, 0x01, operand,
+        ]
         packet[0] = (label << 4) & 0xF0
         onRaw?([0xFF] + packet)  // 0xFF marks an outgoing frame in the log
         socket.send(Data(packet))
@@ -97,8 +99,10 @@ public final class AVCTPHolder: @unchecked Sendable {
         // REGISTER NOTIFICATION: PDU 0x31, reserved, two-byte parameter length (event + interval
         // = 5), then the event id and a four-byte playback interval. The first version omitted
         // the length field, so the headphones read the event id as a length and never answered.
-        var packet: [UInt8] = [0x00, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
-                               0x31, 0x00, 0x00, 0x05, event, 0x00, 0x00, 0x00, 0x00]
+        var packet: [UInt8] = [
+            0x00, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x31, 0x00, 0x00, 0x05, event, 0x00, 0x00, 0x00, 0x00,
+        ]
         packet[0] = (label << 4) & 0xF0
         onRaw?([0xFF] + packet)
         socket.send(Data(packet))
@@ -121,8 +125,10 @@ public final class AVCTPHolder: @unchecked Sendable {
         // (`10 11 0E 01 48 00 00 19 58 10 00 00 01 03`). The previous frame was a guess at the
         // AV/C layout and was answered REJECTED every time, which also made the round-trip
         // measurement meaningless — it was timing a rejection.
-        let frame: [UInt8] = [0x00, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
-                              0x10, 0x00, 0x00, 0x01, 0x03]
+        let frame: [UInt8] = [
+            0x00, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x10, 0x00, 0x00, 0x01, 0x03,
+        ]
         var packet = frame
         packet[0] = (label << 4) & 0xF0
         lock.withLock { sentAt[label] = DispatchTime.now().uptimeNanoseconds }
@@ -161,8 +167,10 @@ public final class AVCTPHolder: @unchecked Sendable {
             // The high bit of the operand is the press/release flag: a release must not fire the
             // key twice, and headphones send both.
             guard b[6] & 0x80 == 0 else { return .unsupported }
-            let names: [UInt8: String] = [0x44: "play", 0x46: "pause", 0x45: "stop", 0x4B: "next",
-                                          0x4C: "previous", 0x41: "volume_up", 0x42: "volume_down"]
+            let names: [UInt8: String] = [
+                0x44: "play", 0x46: "pause", 0x45: "stop", 0x4B: "next",
+                0x4C: "previous", 0x41: "volume_up", 0x42: "volume_down",
+            ]
             guard let name = names[b[6] & 0x7F] else { return .unsupported }
             return .key(name)
         case 0x50:
@@ -184,7 +192,7 @@ public final class AVCTPHolder: @unchecked Sendable {
             return [0x02, 0x00, 0x19, 0x58]
         case 0x03:  // EVENTS SUPPORTED: capability id, count, then the events
             return [0x03, 0x01, 0x0D]
-        default:    // anything else: an empty list, which is a valid answer
+        default:  // anything else: an empty list, which is a valid answer
             return [category, 0x00]
         }
     }

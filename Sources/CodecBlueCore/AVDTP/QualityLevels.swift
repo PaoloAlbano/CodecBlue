@@ -46,12 +46,16 @@ public enum QualityLevels {
     ///   says it does not know.
     public static func describe(capacityKbps: Double, sampleRate: Int = 48000) -> [Level] {
         let ladder = LDACEncoder.ladder(sampleRate: sampleRate)
-        let pick = capacityKbps > 0 ? BitrateAdapter.fitRung(capacityKbps: capacityKbps,
-                                                             sampleRate: sampleRate) : -1
+        let pick =
+            capacityKbps > 0
+            ? BitrateAdapter.fitRung(
+                capacityKbps: capacityKbps,
+                sampleRate: sampleRate) : -1
         return ladder.enumerated().map { rung, kbps in
-            Level(rung: rung, nominalKbps: kbps,
-                  fits: capacityKbps > 0 && Double(kbps) <= capacityKbps * 0.85,
-                  chosen: rung == pick)
+            Level(
+                rung: rung, nominalKbps: kbps,
+                fits: capacityKbps > 0 && Double(kbps) <= capacityKbps * 0.85,
+                chosen: rung == pick)
         }
     }
 
@@ -60,7 +64,8 @@ public enum QualityLevels {
     public static func label(_ level: Level, capacityKbps: Double) -> String {
         // An unnamed rung has no word to put before its bitrate, and `492 492 kbps` reads as a
         // typo. The number is the name.
-        let head = level.rung == 2 || level.rung == 3
+        let head =
+            level.rung == 2 || level.rung == 3
             ? "\(level.nominalKbps) kbps"
             : "\(level.name) \(level.nominalKbps) kbps"
         guard capacityKbps > 0 else { return head }
@@ -92,8 +97,10 @@ public enum QualityLevels {
     /// Returned here rather than left to the stream because the menu has to say it *before* the
     /// choice is made: a menu that lists 990 kbps next to a link that carries 530 is asking the
     /// listener to work out the consequence themselves.
-    public static func wouldUse(_ level: Level, capacityKbps: Double,
-                                sampleRate: Int = 48000) -> Int? {
+    public static func wouldUse(
+        _ level: Level, capacityKbps: Double,
+        sampleRate: Int = 48000
+    ) -> Int? {
         guard capacityKbps > 0 else { return nil }
         let ladder = LDACEncoder.ladder(sampleRate: sampleRate)
         let fitted = BitrateAdapter.fitRung(capacityKbps: capacityKbps, sampleRate: sampleRate)
@@ -112,12 +119,14 @@ public enum QualityLevels {
     public static func menuLabel(_ level: Level, capacityKbps: Double) -> String {
         // An unnamed rung has no word, so its bitrate *is* its name: printing it twice would read
         // as a mistake, and the number is the only thing there is to say.
-        var text = level.rung == 2 || level.rung == 3
+        var text =
+            level.rung == 2 || level.rung == 3
             ? "\(level.nominalKbps) kbps"
             : "\(level.longName) · \(level.nominalKbps) kbps"
         if level.chosen { text = "✓ " + text }
         if capacityKbps > 0 && !level.fits && nothingFits(capacityKbps: capacityKbps)
-            && level.rung == 4 {
+            && level.rung == 4
+        {
             text += " · the lowest there is"
         } else if capacityKbps > 0 && !level.fits {
             // The nominal bitrate is not what the listener will hear, so the label says what they

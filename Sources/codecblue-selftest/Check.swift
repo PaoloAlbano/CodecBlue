@@ -7,8 +7,10 @@ nonisolated(unsafe) var failures = 0
 nonisolated(unsafe) var checks = 0
 nonisolated(unsafe) var currentTest = ""
 
-func check(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
-           file: StaticString = #fileID, line: UInt = #line) {
+func check(
+    _ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
+    file: StaticString = #fileID, line: UInt = #line
+) {
     checks += 1
     if !condition() {
         failures += 1

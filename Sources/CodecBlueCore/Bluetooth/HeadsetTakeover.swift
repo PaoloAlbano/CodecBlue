@@ -38,10 +38,13 @@ public enum TakeoverError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case let .notPaired(address): "\(address) is not known to this Mac (pair it in System Settings first)"
-        case .headphonesDidNotConnect: "the headphones did not connect (off, out of range, or busy with another device)"
-        case let .notGrabbed(result):
-            "could not take the headphones' audio channel from macOS" + (result.map { " (last result \($0))" } ?? "")
+        case .notPaired(let address):
+            "\(address) is not known to this Mac (pair it in System Settings first)"
+        case .headphonesDidNotConnect:
+            "the headphones did not connect (off, out of range, or busy with another device)"
+        case .notGrabbed(let result):
+            "could not take the headphones' audio channel from macOS"
+                + (result.map { " (last result \($0))" } ?? "")
         case .fakeChannel: "the headphones never answered on the grabbed channel"
         }
     }
@@ -80,7 +83,10 @@ public final class HeadsetTakeover: @unchecked Sendable {
     private var extraChannels: [(session: ClassicXPCSession, psm: UInt16)] = []
     private var rfcommChannels: [(session: ClassicXPCSession, channel: UInt8)] = []
 
-    public init(address: String, timing: TakeoverTiming = .measured, log: @escaping @Sendable (String) -> Void) {
+    public init(
+        address: String, timing: TakeoverTiming = .measured,
+        log: @escaping @Sendable (String) -> Void
+    ) {
         self.address = address
         self.timing = timing
         self.log = log
@@ -100,8 +106,9 @@ public final class HeadsetTakeover: @unchecked Sendable {
         if record.isLinkUp {
             log("headphones connected to macOS: taking the link over in place")
         } else {
-            log("headphones not connected: asking macOS to connect them first"
-                + (lowLatency ? " (low latency)" : ""))
+            log(
+                "headphones not connected: asking macOS to connect them first"
+                    + (lowLatency ? " (low latency)" : ""))
             control.connect(device, lowLatency: lowLatency)
             try await waitForSystemConnection(control)
         }
@@ -160,7 +167,10 @@ public final class HeadsetTakeover: @unchecked Sendable {
         let start = Date()
         while Date().timeIntervalSince(start) < timing.systemGoneMaxWait {
             if !SystemHeadphoneAudio.hasDevice(address: address) {
-                log(String(format: "macOS let go %.0f ms after the forced disconnect", Date().timeIntervalSince(start) * 1000))
+                log(
+                    String(
+                        format: "macOS let go %.0f ms after the forced disconnect",
+                        Date().timeIntervalSince(start) * 1000))
                 return
             }
             try? await Task.sleep(for: .milliseconds(20))
@@ -178,12 +188,17 @@ public final class HeadsetTakeover: @unchecked Sendable {
         while Date() < deadline {
             if let won = results.takeWinner() {
                 log("grabbed after \(requests) request(s)")
-                return (sessions[won.session], ChannelSocket(channel: won.channel, label: "avdtp-signal"))
+                return (
+                    sessions[won.session],
+                    ChannelSocket(channel: won.channel, label: "avdtp-signal")
+                )
             }
             if let current = inFlight, results.isFinished(current.session) {
                 inFlight = nil
             }
-            let stuck = inFlight.map { Date().timeIntervalSince($0.since) > timing.requestStuckAfter } ?? false
+            let stuck =
+                inFlight.map { Date().timeIntervalSince($0.since) > timing.requestStuckAfter }
+                ?? false
             if inFlight == nil || stuck {
                 let index = next % sessions.count
                 next += 1
@@ -194,14 +209,17 @@ public final class HeadsetTakeover: @unchecked Sendable {
                     let session = sessions[index]
                     Task {
                         do {
-                            let channel = try await session.openChannel(device, psm: AVDTP.psm, timeout: 5)
+                            let channel = try await session.openChannel(
+                                device, psm: AVDTP.psm, timeout: 5)
                             if !results.finish(index, channel: channel) {
                                 // Someone else already won: give this one back.
                                 close(channel.fd)
                                 session.closeChannel(device, psm: AVDTP.psm)
                             }
                         } catch {
-                            if case let ClassicXPCError.refused(code) = error { results.refused(index, code) } else {
+                            if case ClassicXPCError.refused(let code) = error {
+                                results.refused(index, code)
+                            } else {
                                 results.refused(index, nil)
                             }
                         }
@@ -227,13 +245,16 @@ public final class HeadsetTakeover: @unchecked Sendable {
 
     /// Opens another L2CAP channel to the headphones (AVDTP media, AVRCP...) in its own XPC
     /// session.
-    public func openChannel(psm: UInt16, label: String, priority: Int64 = 0,
-                            timeout: TimeInterval = 5) async throws -> OpenedChannel {
+    public func openChannel(
+        psm: UInt16, label: String, priority: Int64 = 0,
+        timeout: TimeInterval = 5
+    ) async throws -> OpenedChannel {
         guard let device else { throw TakeoverError.notPaired(address) }
         let session = ClassicXPCSession(label: label)
         try await session.start()
         do {
-            let channel = try await session.openChannel(device, psm: psm, priority: priority, timeout: timeout)
+            let channel = try await session.openChannel(
+                device, psm: psm, priority: priority, timeout: timeout)
             extraChannels.append((session, psm))
             return channel
         } catch {
@@ -243,7 +264,9 @@ public final class HeadsetTakeover: @unchecked Sendable {
     }
 
     /// Opens an RFCOMM channel to the headphones in its own XPC session.
-    public func openRFCOMM(channel: UInt8, label: String, timeout: TimeInterval = 5) async throws -> OpenedChannel {
+    public func openRFCOMM(channel: UInt8, label: String, timeout: TimeInterval = 5) async throws
+        -> OpenedChannel
+    {
         guard let device else { throw TakeoverError.notPaired(address) }
         let session = ClassicXPCSession(label: label)
         try await session.start()
@@ -302,7 +325,12 @@ private final class RaceResults: @unchecked Sendable {
 
     func closeRound() { lock.withLock { discardLateWinners = true } }
 
-    func begin(_ i: Int) { lock.withLock { _ = busy.insert(i); finished.remove(i) } }
+    func begin(_ i: Int) {
+        lock.withLock {
+            _ = busy.insert(i)
+            finished.remove(i)
+        }
+    }
     func isBusy(_ i: Int) -> Bool { lock.withLock { busy.contains(i) } }
     func isFinished(_ i: Int) -> Bool { lock.withLock { finished.contains(i) } }
 

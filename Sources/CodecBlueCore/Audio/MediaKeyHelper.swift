@@ -25,8 +25,10 @@ public final class MediaKeyHelper: @unchecked Sendable {
     /// which is not where the binary actually runs from (this exact mistake broke the
     /// LaunchAgent once).
     public static func locate() -> URL? {
-        let self_ = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-        let beside = self_.deletingLastPathComponent().appendingPathComponent("codecblue-keys")
+        // `selfURL`, not `self_`: `self` is a keyword and the underscore was the old dodge, but a
+        // name that has to be explained is worse than a longer one that does not.
+        let selfURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let beside = selfURL.deletingLastPathComponent().appendingPathComponent("codecblue-keys")
         if FileManager.default.isExecutableFile(atPath: beside.path) { return beside }
         return nil
     }
@@ -59,9 +61,11 @@ public final class MediaKeyHelper: @unchecked Sendable {
                 for answer in text {
                     if answer == "denied" {
                         self?.lock.withLock { self?.permissionDenied = true }
-                        log("media keys: macOS has not granted Accessibility permission to "
-                            + "codecblue-keys, so the headphones' play/pause/next do nothing. "
-                            + "Grant it in System Settings > Privacy & Security > Accessibility.")
+                        log(
+                            "media keys: macOS has not granted Accessibility permission to "
+                                + "codecblue-keys, so the headphones' play/pause/next do nothing. "
+                                + "Grant it in System Settings > Privacy & Security > Accessibility."
+                        )
                     } else if answer.hasPrefix("unknown") {
                         log("media keys: helper did not understand \(answer)")
                     } else if answer.contains("no now-playing client") {
@@ -69,9 +73,10 @@ public final class MediaKeyHelper: @unchecked Sendable {
                         // mediaremoted to the registered Now Playing client; with none, the key
                         // is posted and goes nowhere, silently. Measured 2026-11-08: a video
                         // playing in a browser and `nowPlayingPID=0`.
-                        log("media keys: the button was read and the key posted, but macOS has no "
-                            + "now-playing client to send it to, so nothing can pause. This is "
-                            + "the player's decision, not ours.")
+                        log(
+                            "media keys: the button was read and the key posted, but macOS has no "
+                                + "now-playing client to send it to, so nothing can pause. This is "
+                                + "the player's decision, not ours.")
                     }
                 }
             }

@@ -49,8 +49,9 @@ public final class HandsFreeHolder: @unchecked Sendable {
             // indicators. That keeps the service level connection to the bare minimum.
             respond("+BRSF: 0", "OK")
         case upper == "AT+CIND=?":
-            respond(#"+CIND: ("service",(0,1)),("call",(0,1)),("callsetup",(0-3)),("callheld",(0-2)),("signal",(0-5)),("roam",(0,1)),("battchg",(0-5))"#,
-                    "OK")
+            respond(
+                #"+CIND: ("service",(0,1)),("call",(0,1)),("callsetup",(0-3)),("callheld",(0-2)),("signal",(0-5)),("roam",(0,1)),("battchg",(0-5))"#,
+                "OK")
         case upper == "AT+CIND?":
             respond("+CIND: 1,0,0,0,5,0,5", "OK")
         case upper.hasPrefix("AT+CMER"):
@@ -63,10 +64,13 @@ public final class HandsFreeHolder: @unchecked Sendable {
             respond("+XAPL=iPhone,7", "OK")
         case upper.hasPrefix("AT+IPHONEACCEV"):
             // AT+IPHONEACCEV=n,key,value,...: key 1 = battery 0-9
-            let fields = command.split(separator: "=").last?.split(separator: ",").map(String.init) ?? []
+            let fields =
+                command.split(separator: "=").last?.split(separator: ",").map(String.init) ?? []
             var i = 1
             while i + 1 < fields.count {
-                if fields[i] == "1", let level = Int(fields[i + 1]) { onBattery?(min(100, (level + 1) * 10)) }
+                if fields[i] == "1", let level = Int(fields[i + 1]) {
+                    onBattery?(min(100, (level + 1) * 10))
+                }
                 i += 2
             }
             respond("OK")
@@ -77,8 +81,9 @@ public final class HandsFreeHolder: @unchecked Sendable {
             respond("OK")
         case upper.hasPrefix("AT+COPS?"):
             respond(#"+COPS: 0,0,"""#, "OK")
-        case upper.hasPrefix("ATA"), upper.hasPrefix("ATD"), upper.hasPrefix("AT+BLDN"), upper.hasPrefix("AT+CHUP"),
-             upper.hasPrefix("AT+BVRA"), upper.hasPrefix("AT+BCC"):
+        case upper.hasPrefix("ATA"), upper.hasPrefix("ATD"), upper.hasPrefix("AT+BLDN"),
+            upper.hasPrefix("AT+CHUP"),
+            upper.hasPrefix("AT+BVRA"), upper.hasPrefix("AT+BCC"):
             respond("ERROR")  // no calls through us: during calls macOS gets the headphones
         default:
             respond("OK")  // NREC, VGS, VGM, CLIP, CCWA, CMEE, BIA, ... harmless

@@ -243,8 +243,9 @@ public final class AudioStreamKeeper: @unchecked Sendable {
             stateLock.unlock()
             if changed {
                 if registered {
-                    self.log("link quality mode on: bluetoothd has the audio device again "
-                             + "after \(count) attempt(s)")
+                    self.log(
+                        "link quality mode on: bluetoothd has the audio device again "
+                            + "after \(count) attempt(s)")
                 } else {
                     // Not "lost": bluetoothd erases its *audio device* whenever the media channel
                     // is reopened, and with the stream running it may never republish it — while
@@ -253,9 +254,10 @@ public final class AudioStreamKeeper: @unchecked Sendable {
                     // 336 kbps and 62 packets/s and no stall at all. Saying "lost" there accused
                     // the link of a fault it did not have, which is the same mistake the
                     // `link_quality` field made before it was read from the socket.
-                    self.log("link quality mode: bluetoothd erased its audio device (it does that "
-                             + "when the media channel is reopened); still asking, slowly, in case "
-                             + "it comes back")
+                    self.log(
+                        "link quality mode: bluetoothd erased its audio device (it does that "
+                            + "when the media channel is reopened); still asking, slowly, in case "
+                            + "it comes back")
                 }
             }
             // A registration is a rare event and the log is read from an archive: two seconds is

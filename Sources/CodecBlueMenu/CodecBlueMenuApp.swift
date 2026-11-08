@@ -78,16 +78,20 @@ struct ContentView: View {
         // Changing it does not interrupt the stream: libldac changes the frame size it produces
         // and every packet carries its own frame count.
         Menu("Quality") {
-            ForEach(QualityLevels.describe(capacityKbps: model.linkKbps,
-                                           sampleRate: model.streamRate), id: \.rung) { level in
+            ForEach(
+                QualityLevels.describe(
+                    capacityKbps: model.linkKbps,
+                    sampleRate: model.streamRate), id: \.rung
+            ) { level in
                 Button {
                     model.setQuality("\(level.rung)")
                 } label: {
                     // The tick follows what is *playing*, not what was asked for: the rung
                     // settles on its own when the link cannot carry the one chosen.
                     let playing = model.qualityRung == level.rung && model.quality != "unknown"
-                    Text((playing ? "✓ " : "  ")
-                         + QualityLevels.menuLabel(level, capacityKbps: model.linkKbps))
+                    Text(
+                        (playing ? "✓ " : "  ")
+                            + QualityLevels.menuLabel(level, capacityKbps: model.linkKbps))
                 }
             }
             Divider()
@@ -96,17 +100,22 @@ struct ContentView: View {
             } label: {
                 Text(model.adapt ? "✓ Let it choose" : "  Let it choose")
             }
-            Text(model.adapt
-                 ? "It settles on the best level this link carries"
-                 : "A level is a ceiling: it drops if the link cannot carry it")
+            Text(
+                model.adapt
+                    ? "It settles on the best level this link carries"
+                    : "A level is a ceiling: it drops if the link cannot carry it")
         }
 
         Menu("Latency") {
             // The cushion is the latency. These are the values worth trying, not a slider: below
             // about 30 ms the cushion stops covering a stall of the link, and above 150 there is
             // nothing left to gain.
-            ForEach([(30, "30 ms — tightest"), (60, "60 ms — default"),
-                     (100, "100 ms — safer"), (150, "150 ms — steadiest")], id: \.0) { pair in
+            ForEach(
+                [
+                    (30, "30 ms — tightest"), (60, "60 ms — default"),
+                    (100, "100 ms — safer"), (150, "150 ms — steadiest"),
+                ], id: \.0
+            ) { pair in
                 Button {
                     model.setCushion(pair.0)
                 } label: {

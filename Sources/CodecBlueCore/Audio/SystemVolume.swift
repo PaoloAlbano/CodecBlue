@@ -48,7 +48,8 @@ public final class SystemVolume: @unchecked Sendable {
         guard let id = Self.findDevice(named: name) else { return nil }
         device = id
         position = Self.readVolume(device: id) ?? 1
-        stored = Self.readDecibels(device: id).map(Self.gain(fromDecibels:))
+        stored =
+            Self.readDecibels(device: id).map(Self.gain(fromDecibels:))
             ?? Self.applyCurve(position)
         muted = Self.readMute(device: id) ?? false
         listen()
@@ -246,14 +247,16 @@ public final class SystemVolume: @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain)
         var value = Float32(next)
-        let status = AudioObjectSetPropertyData(device, &address, 0, nil,
-                                                UInt32(MemoryLayout<Float32>.size), &value)
+        let status = AudioObjectSetPropertyData(
+            device, &address, 0, nil,
+            UInt32(MemoryLayout<Float32>.size), &value)
         guard status == noErr else { return nil }
         // The listener is asynchronous; update our own copy now so two quick presses add up
         // instead of both starting from the same stale value.
         lock.lock()
         position = next
-        stored = Self.readDecibels(device: device).map(Self.gain(fromDecibels:))
+        stored =
+            Self.readDecibels(device: device).map(Self.gain(fromDecibels:))
             ?? Self.applyCurve(next)
         lock.unlock()
         return next
@@ -310,12 +313,15 @@ public final class SystemVolume: @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain)
         var value = Float32(next)
-        guard AudioObjectSetPropertyData(device, &address, 0, nil,
-                                         UInt32(MemoryLayout<Float32>.size), &value) == noErr
+        guard
+            AudioObjectSetPropertyData(
+                device, &address, 0, nil,
+                UInt32(MemoryLayout<Float32>.size), &value) == noErr
         else { return nil }
         lock.lock()
         position = next
-        stored = Self.readDecibels(device: device).map(Self.gain(fromDecibels:))
+        stored =
+            Self.readDecibels(device: device).map(Self.gain(fromDecibels:))
             ?? Self.applyCurve(next)
         lock.unlock()
         return next
@@ -378,7 +384,9 @@ public final class SystemVolume: @unchecked Sendable {
                 mElement: kAudioObjectPropertyElementMain)
             var classID: AudioClassID = 0
             var classSize = UInt32(MemoryLayout<AudioClassID>.size)
-            guard AudioObjectGetPropertyData(control, &classAddress, 0, nil, &classSize, &classID) == noErr
+            guard
+                AudioObjectGetPropertyData(control, &classAddress, 0, nil, &classSize, &classID)
+                    == noErr
             else { continue }
             guard classID == kAudioMuteControlClassID else { continue }
             var valueAddress = AudioObjectPropertyAddress(
@@ -387,7 +395,9 @@ public final class SystemVolume: @unchecked Sendable {
                 mElement: kAudioObjectPropertyElementMain)
             var value: UInt32 = 0
             var valueSize = UInt32(MemoryLayout<UInt32>.size)
-            guard AudioObjectGetPropertyData(control, &valueAddress, 0, nil, &valueSize, &value) == noErr
+            guard
+                AudioObjectGetPropertyData(control, &valueAddress, 0, nil, &valueSize, &value)
+                    == noErr
             else { continue }
             return value != 0
         }
@@ -401,21 +411,36 @@ public final class SystemVolume: @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address,
-                                             0, nil, &size) == noErr else { return nil }
+        guard
+            AudioObjectGetPropertyDataSize(
+                AudioObjectID(kAudioObjectSystemObject), &address,
+                0, nil, &size) == noErr
+        else { return nil }
         var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
-                                         0, nil, &size, &ids) == noErr else { return nil }
+        guard
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &address,
+                0, nil, &size, &ids) == noErr
+        else { return nil }
         for id in ids {
             var nameAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioObjectPropertyName,
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain)
-            var deviceName: CFString = "" as CFString
-            var nameSize = UInt32(MemoryLayout<CFString>.size)
-            guard AudioObjectGetPropertyData(id, &nameAddress, 0, nil, &nameSize, &deviceName) == noErr
+            // The property is a CFString, so the buffer has to be a `CFString?` that the API
+            // fills in: reading it into a `CFString` and taking its address is the same bytes but
+            // the wrong type, and the compiler is right to say so. `Unmanaged` is not needed
+            // because CoreAudio returns a +0 reference that is valid until the next call.
+            var deviceName: Unmanaged<CFString>?
+            var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            guard
+                AudioObjectGetPropertyData(id, &nameAddress, 0, nil, &nameSize, &deviceName)
+                    == noErr,
+                let deviceName
             else { continue }
-            if (deviceName as String).localizedCaseInsensitiveContains(name) { return id }
+            if (deviceName.takeUnretainedValue() as String).localizedCaseInsensitiveContains(name) {
+                return id
+            }
         }
         return nil
     }

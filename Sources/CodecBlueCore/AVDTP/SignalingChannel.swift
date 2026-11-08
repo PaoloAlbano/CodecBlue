@@ -27,8 +27,9 @@ public final class SignalingChannel: @unchecked Sendable {
 
         public var description: String {
             switch self {
-            case let .timeout(s): "no answer to AVDTP \(s)"
-            case let .rejected(s, why): "AVDTP \(s) rejected (\(why.map { String(format: "%02x", $0) }.joined()))"
+            case .timeout(let s): "no answer to AVDTP \(s)"
+            case .rejected(let s, let why):
+                "AVDTP \(s) rejected (\(why.map { String(format: "%02x", $0) }.joined()))"
             case .closed: "signaling channel closed"
             }
         }
@@ -45,7 +46,10 @@ public final class SignalingChannel: @unchecked Sendable {
         }
         let reply: AVDTP.Message = try await withCheckedThrowingContinuation { continuation in
             lock.withLock { waiters[label] = continuation }
-            guard socket.send(AVDTP.Message(label: label, type: .command, signal: signal, payload: payload).bytes)
+            guard
+                socket.send(
+                    AVDTP.Message(label: label, type: .command, signal: signal, payload: payload)
+                        .bytes)
             else {
                 return fail(label, SignalingError.closed)
             }
@@ -74,7 +78,9 @@ public final class SignalingChannel: @unchecked Sendable {
                 if let onCommand {
                     onCommand(message)
                 } else {
-                    reply(to: message, accept: false, payload: Data([0x13]))  // NOT_SUPPORTED_COMMAND
+                    // 0x13 is NOT_SUPPORTED_COMMAND: the reply a sink must give to a command it
+                    // does not implement, and the one the headphones expect for the ones we do not.
+                    reply(to: message, accept: false, payload: Data([0x13]))
                 }
                 continue
             }

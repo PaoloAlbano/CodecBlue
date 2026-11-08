@@ -18,13 +18,16 @@ APP_DIR := $(HOME)/Applications/CodecBlue
 # `.build/out/Products/Debug` is the directory it points at and which `swift package clean` deletes.
 BIN := .build/debug
 
-.PHONY: all build test selftest menu driver install uninstall clean distclean help
+.PHONY: all build test selftest format lint check menu driver install uninstall clean distclean help
 
 all: build
 
 help:
 	@echo "make build      build everything (Swift package)"
 	@echo "make test       build, then run the self-test (this is what CI runs)"
+	@echo "make format     rewrite the Swift sources with swift-format"
+	@echo "make lint       check formatting and compiler warnings without changing anything"
+	@echo "make check      lint, then test — the whole gate, and what CI runs"
 	@echo "make menu       assemble CodecBlue.app"
 	@echo "make driver     build the virtual output device (no install)"
 	@echo "make install    install driver + programs + menu app (asks for sudo once)"
@@ -50,6 +53,58 @@ test: build
 
 # Kept as an alias because "make selftest" is what one types when looking for the tests.
 selftest: test
+
+# The formatter is the one Apple ships with the toolchain: `xcrun swift-format`. Not swiftlint,
+# not SwiftFormat — this project is built with the Command Line Tools alone, and a tool that has
+# to be installed separately is a tool half the contributors will not have. `xcrun` finds it in
+# the active developer directory, which is where the compiler already comes from.
+SWIFT_FORMAT := xcrun swift-format
+# Found on disk and not asked of git, so a file that is new and not yet `git add`ed is checked
+# too. A formatter that skips the file you are working on is a formatter you stop running.
+SWIFT_SOURCES := $(shell find Sources Driver scripts -name '*.swift' 2>/dev/null) Package.swift
+
+# Rewrites the sources in place. Safe to run at any time: the configuration is committed
+# (.swift-format), so the result is the same on every machine, and `make lint` is what says so.
+format:
+	@$(SWIFT_FORMAT) format --in-place --configuration .swift-format $(SWIFT_SOURCES)
+
+# Two checks, and they answer two different questions.
+#
+# `swift-format lint` answers "is this formatted the way the project says?" — it is the same
+# program as `make format`, run in the mode that reports instead of writing, so the two can never
+# disagree. A line length or an indentation is a style question and this is where the project's
+# answer to it lives.
+#
+# `--strict` is not decoration: without it `swift-format lint` prints the warnings and exits 0, so
+# a target built on it reports "clean" over a file it has just complained about. Measured while
+# writing this: a deliberately misformatted file printed two warnings and the target passed.
+#
+# The compiler answers the other question: "is there anything here that is probably a mistake?".
+# `-warnings-as-errors` is not used, because a new SDK warning would then break a build that is
+# fine; instead the warnings are collected and counted, and any warning fails the target. The
+# difference matters: a warning that appears is a thing to look at, and a build that fails because
+# Apple added a deprecation is a build nobody can fix on a Sunday.
+lint:
+	@echo "swift-format:"
+	@$(SWIFT_FORMAT) lint --strict --configuration .swift-format $(SWIFT_SOURCES) \
+	    && echo "  clean"
+	@echo "compiler warnings:"
+	@mkdir -p .build
+# The compiler prints each warning twice — once on the line, once on the caret line under it — and
+# in colour when it thinks it is talking to a terminal. Both are noise here: one line per warning,
+# no escapes, path relative to the checkout.
+	@swift build 2>&1 \
+	    | sed 's/\x1b\[[0-9;]*m//g' \
+	    | grep -E "^[^ ].*warning:" | grep -v "search path" \
+	    | sed 's|^$(CURDIR)/||' > .build/warnings.txt || true
+	@if [ -s .build/warnings.txt ]; then \
+	    echo "  $$(wc -l < .build/warnings.txt | tr -d ' ') warning(s):"; \
+	    cut -c1-160 .build/warnings.txt; \
+	    exit 1; \
+	else echo "  clean"; fi
+
+# The gate: what CI runs, and what to run before pushing.
+check: lint test
 
 menu:
 	@sh scripts/build-menu-app.sh

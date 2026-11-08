@@ -28,7 +28,9 @@ The repository directory may still be called `ldac_mac`; the project is CodecBlu
 
 ```sh
 git submodule update --init
-make test                                        # build + unit tests (what CI runs)
+make check                                       # format + lint + build + tests (what CI runs)
+make format                                      # rewrite the sources with swift-format
+make test                                        # build + unit tests only
 .build/debug/codecblue version
 .build/debug/codecblue lookup AA:BB:CC:DD:EE:FF  # read-only: what bluetoothd knows
 .build/debug/codecblue probe  AA:BB:CC:DD:EE:FF  # takes the headphones briefly (ask first)
@@ -36,8 +38,14 @@ make test                                        # build + unit tests (what CI r
 
 Unit tests are plain functions in `Sources/codecblue-selftest/` (`test("name") { check(...) }`).
 XCTest is missing from the Command Line Tools and Swift Testing needs Xcode's macro plugins,
-so neither can be used. CI (`.github/workflows/ci.yml`) runs `make test`, which is the same
-command you run by hand: a green CI and a green laptop must mean the same thing.
+so neither can be used. CI (`.github/workflows/ci.yml`) runs `make lint` and `make test`, which
+are the same commands you run by hand: a green CI and a green laptop must mean the same thing.
+
+Formatting is `xcrun swift-format` with the committed `.swift-format` — the tool that comes with
+the toolchain, not one to install. `make format` writes, `make lint` reports, and they are the
+same program with the same configuration, so they cannot disagree. `make lint` also fails on any
+compiler warning: not `-warnings-as-errors`, which would break a build the day Apple adds a
+deprecation, but a count that has to be zero.
 
 A test must not depend on the machine it runs on. Everything that reads the system — the
 installed copy of the app, a real audio device, paired headphones, a loaded driver — either

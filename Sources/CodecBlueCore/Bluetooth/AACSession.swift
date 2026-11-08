@@ -41,18 +41,24 @@ public struct AACSession: Sendable, Equatable {
 
     /// The line a person reads: one sentence per fact, no table.
     public func describe() -> [String] {
-        var lines = [String(format: "macOS asked for AAC at %d Hz: %d bytes every %.2f ms = %.0f kbps",
-                            sampleRate, packetBytes, intervalMilliseconds, kbps)]
+        var lines = [
+            String(
+                format: "macOS asked for AAC at %d Hz: %d bytes every %.2f ms = %.0f kbps",
+                sampleRate, packetBytes, intervalMilliseconds, kbps)
+        ]
         if reports > 0 {
-            lines.append(String(format: "the link, over %d report(s): %.1f%% retransmitted%@",
-                                reports, reTx * 100,
-                                rssi.map { ", RSSI \($0) dBm" } ?? ""))
+            lines.append(
+                String(
+                    format: "the link, over %d report(s): %.1f%% retransmitted%@",
+                    reports, reTx * 100,
+                    rssi.map { ", RSSI \($0) dBm" } ?? ""))
         } else {
             lines.append("the link: no report in the window, so nothing is claimed about it")
         }
         if bitrateAdjustments > 0 {
-            lines.append("macOS lowered its own bitrate \(bitrateAdjustments) time(s) when the link "
-                         + "complained: that is the machinery LDAC has nothing equivalent to")
+            lines.append(
+                "macOS lowered its own bitrate \(bitrateAdjustments) time(s) when the link "
+                    + "complained: that is the machinery LDAC has nothing equivalent to")
         }
         return lines
     }
@@ -63,9 +69,10 @@ public struct AACSession: Sendable, Equatable {
     /// it is a floor of libldac's public API and not of the format — see §16.
     public func comparison(floorKbps: Int) -> String {
         let ratio = Double(floorKbps) / kbps
-        return String(format: "AAC asks %.0f kbps, LDAC cannot ask less than %d: %.1f× the bitrate, "
-                      + "so the link has to be %.1f× better before this path is as steady",
-                      kbps, floorKbps, ratio, ratio)
+        return String(
+            format: "AAC asks %.0f kbps, LDAC cannot ask less than %d: %.1f× the bitrate, "
+                + "so the link has to be %.1f× better before this path is as steady",
+            kbps, floorKbps, ratio, ratio)
     }
 
     /// The rule, exposed for the self-test: the log lines are the only input.
@@ -102,22 +109,27 @@ public struct AACSession: Sendable, Equatable {
             if line.contains("adjustBitRateForMac") { adjustments += 1 }
             if line.contains("LinkQualityReport") {
                 reports += 1
-                if let value = number(after: "ReTx = ", in: line, before: "%") { reTx = value / 100 }
+                if let value = number(after: "ReTx = ", in: line, before: "%") {
+                    reTx = value / 100
+                }
                 if let value = number(after: "RSSI = ", in: line) { rssi = Int(value) }
             }
         }
         guard let sampleRate, let packetBytes, let interval, interval > 0 else { return nil }
-        return AACSession(sampleRate: sampleRate, packetBytes: packetBytes,
-                          intervalMilliseconds: interval, reTx: reTx, rssi: rssi,
-                          bitrateAdjustments: adjustments, reports: reports)
+        return AACSession(
+            sampleRate: sampleRate, packetBytes: packetBytes,
+            intervalMilliseconds: interval, reTx: reTx, rssi: rssi,
+            bitrateAdjustments: adjustments, reports: reports)
     }
 
     /// The first number in a line, optionally between two markers.
     ///
     /// Written by hand rather than with a regex because the log is full of numbers that are not the
     /// one wanted (`Handle = 29`, `max=879`, `(12+668)`) and the marker is what makes it findable.
-    static func number(after marker: String, in line: Substring,
-                       before stop: String? = nil) -> Double? {
+    static func number(
+        after marker: String, in line: Substring,
+        before stop: String? = nil
+    ) -> Double? {
         guard let start = line.range(of: marker) else { return nil }
         var rest = line[start.upperBound...]
         if let stop, let end = rest.range(of: stop) { rest = rest[..<end.lowerBound] }

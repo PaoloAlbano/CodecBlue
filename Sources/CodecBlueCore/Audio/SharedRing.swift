@@ -28,7 +28,7 @@ public final class SharedRing: @unchecked Sendable {
         case cannotOpen(String)
         public var description: String {
             switch self {
-            case let .cannotOpen(why): "cannot open the driver's ring: \(why)"
+            case .cannotOpen(let why): "cannot open the driver's ring: \(why)"
             }
         }
     }
@@ -38,11 +38,12 @@ public final class SharedRing: @unchecked Sendable {
     public init(path: String = SharedRing.path) throws {
         let fd = open(path, O_RDWR)
         guard fd >= 0 else {
-            throw RingError.cannotOpen("\(path) does not exist — is the driver installed and running?")
+            throw RingError.cannotOpen(
+                "\(path) does not exist — is the driver installed and running?")
         }
         defer { close(fd) }
         guard let map = mmap(nil, Self.regionBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0),
-              map != MAP_FAILED
+            map != MAP_FAILED
         else { throw RingError.cannotOpen("mmap failed") }
         base = map
         writeIndex = map.advanced(by: 0).assumingMemoryBound(to: UInt64.self)
@@ -81,8 +82,10 @@ public final class SharedRing: @unchecked Sendable {
     /// Where to start reading, given what has been written and what has already been read.
     /// Pure arithmetic, so the rule can be tested without a driver: it is the rule that decides
     /// whether a resume plays the backlog (a click) or skips to the newest audio.
-    public static func startIndex(written: UInt64, read: UInt64, count: Int,
-                                  staleAfterFrames: Int) -> UInt64 {
+    public static func startIndex(
+        written: UInt64, read: UInt64, count: Int,
+        staleAfterFrames: Int
+    ) -> UInt64 {
         var taken = read
         let waiting = written > taken ? written - taken : 0
         // The ring wraps: it holds `frames` and the writer overwrites the oldest. If the reader
@@ -179,15 +182,18 @@ public final class SharedRing: @unchecked Sendable {
 
     public func read(into buffer: inout [Float], count: Int) -> Int {
         let written = writeIndex.pointee
-        var taken = Self.startIndex(written: written, read: readIndex.pointee,
-                                    count: count, staleAfterFrames: staleAfterFrames)
+        let taken = Self.startIndex(
+            written: written, read: readIndex.pointee,
+            count: count, staleAfterFrames: staleAfterFrames)
         if taken != readIndex.pointee {
             readIndex.pointee = taken
             skips += 1
         }
         let wanted = min(count, Int(written - taken))
         guard wanted > 0 else { return 0 }
-        if buffer.count < wanted * Self.channels { buffer = [Float](repeating: 0, count: wanted * Self.channels) }
+        if buffer.count < wanted * Self.channels {
+            buffer = [Float](repeating: 0, count: wanted * Self.channels)
+        }
         for i in 0..<wanted {
             let slot = Int((taken + UInt64(i)) % UInt64(Self.frames))
             buffer[i * 2] = samples[slot * 2]
@@ -209,7 +215,15 @@ public final class CushionClock: @unchecked Sendable {
     }
 
     public var value: TimeInterval {
-        get { lock.lock(); defer { lock.unlock() }; return seconds }
-        set { lock.lock(); seconds = newValue; lock.unlock() }
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return seconds
+        }
+        set {
+            lock.lock()
+            seconds = newValue
+            lock.unlock()
+        }
     }
 }

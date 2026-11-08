@@ -14,7 +14,7 @@ public enum LaunchAgentError: Error, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case let .launchctlFailed(status):
+        case .launchctlFailed(let status):
             return "launchctl refused to load the agent (exit \(status))"
         }
     }
@@ -35,40 +35,42 @@ public enum LaunchAgent {
     /// `KeepAlive` is on: the streamer exits when the headphones disconnect, and coming back when
     /// they return is the whole point of running at login. `ThrottleInterval` keeps a crash loop
     /// from spinning: five seconds between attempts.
-    public static func plist(executable: String, address: String,
-                             arguments: [String] = []) -> String {
+    public static func plist(
+        executable: String, address: String,
+        arguments: [String] = []
+    ) -> String {
         let allArguments = ([executable, "system", address] + arguments)
             .map { "<string>\(escape($0))</string>" }
             .joined(separator: "\n        ")
         return """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(label)</string>
-            <key>ProgramArguments</key>
-            <array>
-                \(allArguments)
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-            <key>ThrottleInterval</key>
-            <integer>5</integer>
-            <key>StandardOutPath</key>
-            <string>\(logPath)</string>
-            <key>StandardErrorPath</key>
-            <string>\(logPath)</string>
-            <key>ProcessType</key>
-            <string>Interactive</string>
-            <key>LimitLoadToSessionType</key>
-            <string>Aqua</string>
-        </dict>
-        </plist>
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>\(label)</string>
+                <key>ProgramArguments</key>
+                <array>
+                    \(allArguments)
+                </array>
+                <key>RunAtLoad</key>
+                <true/>
+                <key>KeepAlive</key>
+                <true/>
+                <key>ThrottleInterval</key>
+                <integer>5</integer>
+                <key>StandardOutPath</key>
+                <string>\(logPath)</string>
+                <key>StandardErrorPath</key>
+                <string>\(logPath)</string>
+                <key>ProcessType</key>
+                <string>Interactive</string>
+                <key>LimitLoadToSessionType</key>
+                <string>Aqua</string>
+            </dict>
+            </plist>
 
-        """
+            """
     }
 
     /// The arguments that carry the listener's choices into the stream.
@@ -87,7 +89,9 @@ public enum LaunchAgent {
     /// cannot carry it, so a pinned level no longer implies `--no-adapt`: the adapter is what
     /// makes the ceiling safe. `--no-adapt` is written only when the listener turned the adapter
     /// off on purpose.
-    public static func arguments(quality: String?, adapt: Bool, cushionMilliseconds: Int?) -> [String] {
+    public static func arguments(quality: String?, adapt: Bool, cushionMilliseconds: Int?)
+        -> [String]
+    {
         var out: [String] = []
         if let quality { out += ["--quality", quality] }
         if !adapt { out += ["--no-adapt"] }
@@ -141,7 +145,9 @@ public enum LaunchAgent {
         // fails on a test that is right about the code and wrong about the machine. Measured
         // 2026-11-08: the GitHub runner has no ~/Applications/CodecBlue, so the fallback branch ran
         // and the assertion about the installed copy could not hold.
-        let installed = installed ?? FileManager.default.homeDirectoryForCurrentUser
+        let installed =
+            installed
+            ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications/CodecBlue/codecblue")
         if FileManager.default.isExecutableFile(atPath: installed.path) {
             return installed.path
@@ -204,7 +210,8 @@ public enum LaunchAgent {
     /// has not moved, nothing is playing into it.
     public static func isRingMoving(path: String = "/tmp/codecblue-ring") -> Bool {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-              let modified = attributes[.modificationDate] as? Date else {
+            let modified = attributes[.modificationDate] as? Date
+        else {
             return false
         }
         return Date().timeIntervalSince(modified) < 2

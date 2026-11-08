@@ -18,10 +18,14 @@ enum MediaPacket {
         var packet = Data(capacity: rtpHeaderSize + payload.count)
         packet.append(contentsOf: [0x80, payloadType])  // RTP v2, no padding/extension/CSRC
         packet.append(contentsOf: [UInt8(sequence >> 8), UInt8(sequence & 0xFF)])
-        packet.append(contentsOf: [UInt8(timestamp >> 24), UInt8((timestamp >> 16) & 0xFF),
-                                   UInt8((timestamp >> 8) & 0xFF), UInt8(timestamp & 0xFF)])
-        packet.append(contentsOf: [UInt8(ssrc >> 24), UInt8((ssrc >> 16) & 0xFF),
-                                   UInt8((ssrc >> 8) & 0xFF), UInt8(ssrc & 0xFF)])
+        packet.append(contentsOf: [
+            UInt8(timestamp >> 24), UInt8((timestamp >> 16) & 0xFF),
+            UInt8((timestamp >> 8) & 0xFF), UInt8(timestamp & 0xFF),
+        ])
+        packet.append(contentsOf: [
+            UInt8(ssrc >> 24), UInt8((ssrc >> 16) & 0xFF),
+            UInt8((ssrc >> 8) & 0xFF), UInt8(ssrc & 0xFF),
+        ])
         packet.append(payload)
         return packet
     }

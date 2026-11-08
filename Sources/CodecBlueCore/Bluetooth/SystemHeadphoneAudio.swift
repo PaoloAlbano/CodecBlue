@@ -19,7 +19,9 @@ public enum SystemHeadphoneAudio {
     /// UIDs of macOS's audio devices for the headphones (diagnostics).
     public static func devices(address: String) -> [String] {
         let prefix = uidPrefix(for: address)
-        return deviceUIDs().filter { $0.uppercased().replacingOccurrences(of: ":", with: "-").hasPrefix(prefix) }
+        return deviceUIDs().filter {
+            $0.uppercased().replacingOccurrences(of: ":", with: "-").hasPrefix(prefix)
+        }
     }
 
     static func deviceUIDs() -> [String] {
@@ -30,9 +32,13 @@ public enum SystemHeadphoneAudio {
         )
         let system = AudioObjectID(kAudioObjectSystemObject)
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr else { return [] }
+        guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr else {
+            return []
+        }
         var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &ids) == noErr else { return [] }
+        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &ids) == noErr else {
+            return []
+        }
         return ids.compactMap { id in
             var uidAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyDeviceUID,
@@ -41,7 +47,9 @@ public enum SystemHeadphoneAudio {
             )
             var uid: Unmanaged<CFString>?
             var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-            guard AudioObjectGetPropertyData(id, &uidAddress, 0, nil, &uidSize, &uid) == noErr, let uid else {
+            guard AudioObjectGetPropertyData(id, &uidAddress, 0, nil, &uidSize, &uid) == noErr,
+                let uid
+            else {
                 return nil
             }
             return uid.takeRetainedValue() as String

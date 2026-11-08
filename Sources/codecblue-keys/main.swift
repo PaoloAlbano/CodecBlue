@@ -37,11 +37,11 @@ import Foundation
 /// `ev_keymap.h`, which is not exposed to Swift. Written out with their names so the numbers in
 /// the code mean something.
 enum MediaKey: Int32 {
-    case playPause = 16   // NX_KEYTYPE_PLAY
-    case next = 17        // NX_KEYTYPE_NEXT
-    case previous = 18    // NX_KEYTYPE_PREVIOUS
-    case fast = 19        // NX_KEYTYPE_FAST
-    case rewind = 20      // NX_KEYTYPE_REWIND
+    case playPause = 16  // NX_KEYTYPE_PLAY
+    case next = 17  // NX_KEYTYPE_NEXT
+    case previous = 18  // NX_KEYTYPE_PREVIOUS
+    case fast = 19  // NX_KEYTYPE_FAST
+    case rewind = 20  // NX_KEYTYPE_REWIND
 }
 
 /// Posts a media key as a down/up pair.
@@ -55,17 +55,19 @@ func post(_ key: MediaKey) {
         let state: Int32 = isDown ? 0x0A00 : 0x0B00
         let data1 = Int((key.rawValue << 16) | state)
         let flags = NSEvent.ModifierFlags(rawValue: UInt(isDown ? 0x0A00 : 0x0B00))
-        guard let event = NSEvent.otherEvent(
-            with: .systemDefined,
-            location: .zero,
-            modifierFlags: flags,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            subtype: 8,
-            data1: data1,
-            data2: -1
-        ) else { continue }
+        guard
+            let event = NSEvent.otherEvent(
+                with: .systemDefined,
+                location: .zero,
+                modifierFlags: flags,
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                subtype: 8,
+                data1: data1,
+                data2: -1
+            )
+        else { continue }
         event.cgEvent?.post(tap: .cghidEventTap)
     }
 }
@@ -106,7 +108,8 @@ enum MediaRemote {
     private static let send: SendCommand? = {
         let path = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
         guard let handle = dlopen(path, RTLD_NOW),
-              let symbol = dlsym(handle, "MRMediaRemoteSendCommand") else { return nil }
+            let symbol = dlsym(handle, "MRMediaRemoteSendCommand")
+        else { return nil }
         return unsafeBitCast(symbol, to: SendCommand.self)
     }()
 
@@ -136,10 +139,13 @@ enum MediaRemote {
     /// and nothing happens. Measured 2026-11-08 on this Mac: `nowPlayingPID=0` while a video
     /// played in a browser, and every command was accepted and dropped.
     static func nowPlayingPID() -> Int32 {
-        typealias GetPID = @convention(c) (DispatchQueue, @escaping @convention(block) (Int32) -> Void) -> Void
-        guard let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
-                                  RTLD_NOW),
-              let symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationPID")
+        typealias GetPID =
+            @convention(c) (DispatchQueue, @escaping @convention(block) (Int32) -> Void) -> Void
+        guard
+            let handle = dlopen(
+                "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
+                RTLD_NOW),
+            let symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationPID")
         else { return -1 }
         let get = unsafeBitCast(symbol, to: GetPID.self)
         var result: Int32 = 0

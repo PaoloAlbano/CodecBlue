@@ -36,8 +36,10 @@ public enum CBDeviceUUID {
         public var best: String? { registered ?? anyA2DP }
     }
 
-    public static func resolve(for address: String, preferring name: String? = nil,
-                               window: String = defaultWindow) -> Answer {
+    public static func resolve(
+        for address: String, preferring name: String? = nil,
+        window: String = defaultWindow
+    ) -> Answer {
         guard let text = BluetoothLog.text(window: window) else {
             return Answer(registered: nil, anyA2DP: nil)
         }
@@ -45,19 +47,25 @@ public enum CBDeviceUUID {
     }
 
     /// The fallback alone, for the diagnostics that only want it.
-    public static func find(for address: String, preferring name: String? = nil,
-                            window: String = defaultWindow) -> String? {
+    public static func find(
+        for address: String, preferring name: String? = nil,
+        window: String = defaultWindow
+    ) -> String? {
         resolve(for: address, preferring: name, window: window).anyA2DP
     }
 
     /// The registered device alone, for the diagnostics that only want it.
-    public static func findRegistered(for address: String, window: String = defaultWindow) -> String? {
+    public static func findRegistered(for address: String, window: String = defaultWindow)
+        -> String?
+    {
         resolve(for: address, window: window).registered
     }
 
     /// The rule, exposed for the self-test: the log lines are the only input.
-    public static func parse(_ text: String, address: String,
-                             preferring name: String? = nil) -> Answer {
+    public static func parse(
+        _ text: String, address: String,
+        preferring name: String? = nil
+    ) -> Answer {
         var lastA2DP: String?
         /// The UUID in force at the moment of the last registration: the `CBDevice` line for a
         /// pair of headphones is printed when it connects or is found, which can be minutes before
@@ -86,8 +94,9 @@ public enum CBDeviceUUID {
                 if line.contains("A2DP"), let found = uuid(in: line) { fallback = found }
             }
         }
-        return Answer(registered: registered ? (atRegistration ?? lastA2DP) : nil,
-                      anyA2DP: fallback)
+        return Answer(
+            registered: registered ? (atRegistration ?? lastA2DP) : nil,
+            anyA2DP: fallback)
     }
 }
 
@@ -123,7 +132,9 @@ public enum BluetoothLog {
 extension CBDeviceUUID {
     /// The UUID of a `CBDevice …` line, or nil if the line does not carry one.
     static func uuid(in line: Substring) -> String? {
-        guard line.contains("CBDevice "), let range = line.range(of: "CBDevice ") else { return nil }
+        guard line.contains("CBDevice "), let range = line.range(of: "CBDevice ") else {
+            return nil
+        }
         let candidate = String(line[range.upperBound...].prefix(36))
         guard candidate.count == 36, candidate.filter({ $0 == "-" }).count == 4 else { return nil }
         return candidate

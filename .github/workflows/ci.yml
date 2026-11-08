@@ -11,10 +11,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      # `make test` and not `swift run codecblue-selftest`, so that a green CI and a green
-      # `make test` on a laptop mean the same thing. The first version of this file ran the test
-      # binary directly and drifted from what a person runs by hand — which is how a test that
+      # `make lint` and `make test`, and not the tools directly, so that a green CI and a green
+      # `make check` on a laptop mean the same thing. The first version of this file ran the test
+      # binary itself and drifted from what a person runs by hand — which is how a test that
       # depended on the machine (an installed copy of the app in ~/Applications) passed here and
       # failed on the runner.
+      #
+      # Two steps and not one, because they fail for different reasons and the log should say
+      # which: a formatting error is a `make format` away, a test failure is not.
+      #
+      # `swift-format` comes with the toolchain (`xcrun swift-format`), so there is nothing to
+      # install and no version to pin: the runner's Xcode and the laptop's Command Line Tools are
+      # both found through `xcrun`, and `.swift-format` in the repository is the whole
+      # configuration.
+      - name: Format and lint
+        run: make lint
+
       - name: Build and test
         run: make test

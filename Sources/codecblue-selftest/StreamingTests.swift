@@ -1,5 +1,6 @@
-@testable import CodecBlueCore
 import Foundation
+
+@testable import CodecBlueCore
 
 func streamingTests() {
     test("LDAC media header carries the frame count in its low bits") {
@@ -10,11 +11,13 @@ func streamingTests() {
     }
 
     test("an RTP media packet has the A2DP layout") {
-        let packet = MediaPacket.rtp(sequence: 0x1234, timestamp: 0x0100_0000, ssrc: 1,
-                                     payload: Data([0x03, 0xAA, 0xBB]))
+        let packet = MediaPacket.rtp(
+            sequence: 0x1234, timestamp: 0x0100_0000, ssrc: 1,
+            payload: Data([0x03, 0xAA, 0xBB]))
         check(packet.count == 15)
-        check(Array(packet[0..<12]) == [0x80, 96, 0x12, 0x34, 0x01, 0x00, 0x00, 0x00, 0, 0, 0, 1],
-              "\(Array(packet[0..<12]))")
+        check(
+            Array(packet[0..<12]) == [0x80, 96, 0x12, 0x34, 0x01, 0x00, 0x00, 0x00, 0, 0, 0, 1],
+            "\(Array(packet[0..<12]))")
         check(Array(packet[12...]) == [0x03, 0xAA, 0xBB])
     }
 
@@ -30,9 +33,13 @@ func streamingTests() {
         while i + 256 <= tone.samples.count {
             for j in 0..<256 { block[j] = tone.samples[i + j] }
             i += 256
-            guard let out = try block.withUnsafeBufferPointer({ try encoder.encode($0) }) else { continue }
+            guard let out = try block.withUnsafeBufferPointer({ try encoder.encode($0) }) else {
+                continue
+            }
             payloads += 1
-            check(out.payload.first == 0xAA, "payload starts with \(String(format: "%02x", out.payload.first ?? 0))")
+            check(
+                out.payload.first == 0xAA,
+                "payload starts with \(String(format: "%02x", out.payload.first ?? 0))")
             check(out.frameCount >= 1 && out.frameCount <= 15, "\(out.frameCount) frames")
         }
         check(payloads > 5, "\(payloads) payloads")
@@ -83,8 +90,9 @@ func streamingTests() {
     test("the link meter reports the audio the socket took, per window") {
         var meter = LinkMeter()
         for _ in 0..<10 { meter.accepted(frames: 480) }  // 10 ms of audio each
-        check(abs(meter.takeFraction(sampleRate: 48000, window: 1) - 0.1) < 1e-9,
-              "\(meter.takeFraction(sampleRate: 48000, window: 1))")
+        check(
+            abs(meter.takeFraction(sampleRate: 48000, window: 1) - 0.1) < 1e-9,
+            "\(meter.takeFraction(sampleRate: 48000, window: 1))")
         check(meter.take() == 0, "the window resets")
         meter.stalled(at: 1_000_000_000)
         meter.drained(at: 1_050_000_000)
@@ -108,10 +116,14 @@ func streamingTests() {
         stats.record(droppedFrames: 4800)
         stats.record(stall: 0.05)
         let window = 1.0
-        check(abs(stats.sentKbps(window: window) - 543.2) < 0.1, "\(stats.sentKbps(window: window))")
-        check(abs(stats.packetsPerSecond(window: window) - 100) < 1e-9, "\(stats.packetsPerSecond(window: window))")
-        check(abs(stats.deliveredFraction(sampleRate: 48000, window: window) - 0.8) < 1e-9,
-              "\(stats.deliveredFraction(sampleRate: 48000, window: window))")
+        check(
+            abs(stats.sentKbps(window: window) - 543.2) < 0.1, "\(stats.sentKbps(window: window))")
+        check(
+            abs(stats.packetsPerSecond(window: window) - 100) < 1e-9,
+            "\(stats.packetsPerSecond(window: window))")
+        check(
+            abs(stats.deliveredFraction(sampleRate: 48000, window: window) - 0.8) < 1e-9,
+            "\(stats.deliveredFraction(sampleRate: 48000, window: window))")
         check(abs(stats.droppedFraction(sampleRate: 48000, window: window) - 0.1) < 1e-9)
         check(stats.linkIsTheBottleneck)
         check(stats.stallCount == 1)
@@ -124,32 +136,38 @@ func streamingTests() {
 func deviceUUIDTests() {
     test("the device UUID is read from bluetoothd's own log line") {
         let log = """
-        2026-11-06 11:36:52.680357 bluetoothd: (CoreUtils) [com.apple.bluetooth:CBDevice] \
-        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, BDA <private>, \
-        CnS 0x800019 < HFP AVRCP A2DP ACL >
-        """
-        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP == "4379D275-655C-EEB8-BB72-643BF2534BE0",
-              "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP ?? "nil")")
+            2026-11-06 11:36:52.680357 bluetoothd: (CoreUtils) [com.apple.bluetooth:CBDevice] \
+            Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, BDA <private>, \
+            CnS 0x800019 < HFP AVRCP A2DP ACL >
+            """
+        check(
+            CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP
+                == "4379D275-655C-EEB8-BB72-643BF2534BE0",
+            "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP ?? "nil")")
     }
 
     test("a device without A2DP is not the one we want") {
         let log = """
-        Device found: CBDevice 11111111-2222-3333-4444-555555555555, BDA <private>, \
-        CnS 0x800000 < ACL >
-        """
+            Device found: CBDevice 11111111-2222-3333-4444-555555555555, BDA <private>, \
+            CnS 0x800000 < ACL >
+            """
         check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP == nil)
     }
 
     test("the last mention wins, so a reconnect is followed") {
         let log = """
-        Device found: CBDevice AAAAAAAA-0000-0000-0000-000000000001, CnS 0x19 < A2DP >
-        Device found: CBDevice BBBBBBBB-0000-0000-0000-000000000002, CnS 0x19 < A2DP >
-        """
-        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP == "BBBBBBBB-0000-0000-0000-000000000002")
+            Device found: CBDevice AAAAAAAA-0000-0000-0000-000000000001, CnS 0x19 < A2DP >
+            Device found: CBDevice BBBBBBBB-0000-0000-0000-000000000002, CnS 0x19 < A2DP >
+            """
+        check(
+            CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").anyA2DP
+                == "BBBBBBBB-0000-0000-0000-000000000002")
     }
 
     test("a line that only looks like one is rejected") {
-        check(CBDeviceUUID.parse("CBDevice not-a-uuid A2DP", address: "40:DC:A5:0E:14:48").anyA2DP == nil)
+        check(
+            CBDeviceUUID.parse("CBDevice not-a-uuid A2DP", address: "40:DC:A5:0E:14:48").anyA2DP
+                == nil)
         check(CBDeviceUUID.parse("", address: "40:DC:A5:0E:14:48").anyA2DP == nil)
     }
 
@@ -158,54 +176,57 @@ func deviceUUIDTests() {
         // redacts the address; the `Register audio device` line carries the address and no UUID.
         // Neither alone is enough, which is why the two are read together.
         let log = """
-        16:14:12.902 [CBDaemonServer] Monitor Device Found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, \
-        BDA <private>, CnS 0x800000 < ACL >, SupS 0x200019 < HFP AVRCP A2DP SerialPort >
-        16:14:12.254 [Server.Audio] Register audio device 40:DC:A5:0E:14:48-tacl
-        """
-        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
-              == "4379D275-655C-EEB8-BB72-643BF2534BE0",
-              "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered ?? "nil")")
+            16:14:12.902 [CBDaemonServer] Monitor Device Found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, \
+            BDA <private>, CnS 0x800000 < ACL >, SupS 0x200019 < HFP AVRCP A2DP SerialPort >
+            16:14:12.254 [Server.Audio] Register audio device 40:DC:A5:0E:14:48-tacl
+            """
+        check(
+            CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
+                == "4379D275-655C-EEB8-BB72-643BF2534BE0",
+            "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered ?? "nil")")
     }
 
     test("a device bluetoothd has erased is not registered, whatever the UUID") {
         let log = """
-        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
-        Register audio device 40:DC:A5:0E:14:48-tacl
-        Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
-        """
+            Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
+            """
         check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered == nil)
     }
 
     test("a re-registration is followed") {
         let log = """
-        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
-        Register audio device 40:DC:A5:0E:14:48-tacl
-        Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
-        Register audio device 40:DC:A5:0E:14:48-tacl
-        """
-        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
-              == "4379D275-655C-EEB8-BB72-643BF2534BE0")
+            Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            """
+        check(
+            CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
+                == "4379D275-655C-EEB8-BB72-643BF2534BE0")
     }
 
     test("another device's UUID is not mistaken for ours") {
         // The trap this test exists for: bluetoothd prints a CBDevice line for every phone that
         // advertises nearby, and the last one in the window is not the headphones.
         let log = """
-        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
-        Register audio device 40:DC:A5:0E:14:48-tacl
-        Identities resolve added: CBDevice B1A311A0-867B-9E35-4619-0E6682B47503, BLEAdvertisementData
-        Identities resolve added: CBDevice F2BEEF75-CDB1-CB5B-11FA-60FD91117744, AirDrop
-        """
-        check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
-              == "4379D275-655C-EEB8-BB72-643BF2534BE0",
-              "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered ?? "nil")")
+            Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            Identities resolve added: CBDevice B1A311A0-867B-9E35-4619-0E6682B47503, BLEAdvertisementData
+            Identities resolve added: CBDevice F2BEEF75-CDB1-CB5B-11FA-60FD91117744, AirDrop
+            """
+        check(
+            CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered
+                == "4379D275-655C-EEB8-BB72-643BF2534BE0",
+            "\(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered ?? "nil")")
     }
 
     test("an address that is only a substring does not match") {
         let log = """
-        Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
-        Register audio device AC:BD:70:5C:06:1C-tacl
-        """
+            Device found: CBDevice 4379D275-655C-EEB8-BB72-643BF2534BE0, A2DP
+            Register audio device AC:BD:70:5C:06:1C-tacl
+            """
         check(CBDeviceUUID.parse(log, address: "40:DC:A5:0E:14:48").registered == nil)
     }
 
@@ -247,8 +268,9 @@ func bitrateAdapterTests() {
 
     test("it never steps below the bottom rung or above the top") {
         var adapter = BitrateAdapter(minimumInterval: 0)
-        check(adapter.decide(current: 4, dropped: 0.9, queueFill: 0.9) == .hold,
-              "330 kbps is the bottom")
+        check(
+            adapter.decide(current: 4, dropped: 0.9, queueFill: 0.9) == .hold,
+            "330 kbps is the bottom")
         var up = BitrateAdapter(upAfter: 1, minimumInterval: 0)
         _ = up.decide(current: 0, dropped: 0, queueFill: 0)
         check(up.decide(current: 0, dropped: 0, queueFill: 0) == .hold, "990 kbps is the top")
@@ -265,24 +287,27 @@ func bitrateAdapterTests() {
         var adapter = BitrateAdapter(upAfter: 2, minimumInterval: 0)
         _ = adapter.decide(current: 4, dropped: 0, queueFill: 0)
         _ = adapter.decide(current: 4, dropped: 0.5, queueFill: 0)  // but at the bottom
-        check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold,
-              "the count started again")
+        check(
+            adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold,
+            "the count started again")
         check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .up(3))
     }
 
     test("it does not change again inside the minimum interval") {
         var adapter = BitrateAdapter(minimumInterval: 60)
         check(adapter.decide(current: 0, dropped: 0.9, queueFill: 0) == .down(1))
-        check(adapter.decide(current: 1, dropped: 0.9, queueFill: 0) == .hold,
-              "too soon to move again")
+        check(
+            adapter.decide(current: 1, dropped: 0.9, queueFill: 0) == .hold,
+            "too soon to move again")
     }
 
     test("the rung that fits is chosen from the measured capacity, not from the names") {
         // The measurement this exists for: this link carries ~530 kbps, and none of the three
         // named levels fits it — 660 is too much, 330 leaves half the bitrate on the table.
         // 492 (rung 2) is the answer, and it has no name.
-        check(BitrateAdapter.fitRung(capacityKbps: 530) == 3,
-              "\(BitrateAdapter.fitRung(capacityKbps: 530))")
+        check(
+            BitrateAdapter.fitRung(capacityKbps: 530) == 3,
+            "\(BitrateAdapter.fitRung(capacityKbps: 530))")
         check(BitrateAdapter.fitRung(capacityKbps: 1300) == 0)
         check(BitrateAdapter.fitRung(capacityKbps: 900) == 1, "765 of budget takes 660")
         check(BitrateAdapter.fitRung(capacityKbps: 700) == 2, "595 of budget takes 492")
@@ -303,8 +328,9 @@ func bitrateBackoffTests() {
         check(adapter.decide(current: 1, dropped: 0.4, queueFill: 0.1) == .down(2))
         // Clean windows at 330: it wants to go up, but 660 is blocked.
         for _ in 0..<5 {
-            check(adapter.decide(current: 2, dropped: 0, queueFill: 0) == .hold,
-                  "660 failed a moment ago")
+            check(
+                adapter.decide(current: 2, dropped: 0, queueFill: 0) == .hold,
+                "660 failed a moment ago")
         }
     }
 
@@ -313,15 +339,22 @@ func bitrateBackoffTests() {
         let start = Date()
         _ = adapter.decide(current: 1, dropped: 0.4, queueFill: 0, now: start)
         // Blocked for 10 s: at 11 s it may try again.
-        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(11)) == .up(1))
+        check(
+            adapter.decide(
+                current: 2, dropped: 0, queueFill: 0,
+                now: start.addingTimeInterval(11)) == .up(1))
         // Fail again: now blocked for 20 s.
-        _ = adapter.decide(current: 1, dropped: 0.4, queueFill: 0,
-                           now: start.addingTimeInterval(12))
-        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(20)) == .hold, "still blocked")
-        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(33)) == .up(1), "wait doubled")
+        _ = adapter.decide(
+            current: 1, dropped: 0.4, queueFill: 0,
+            now: start.addingTimeInterval(12))
+        check(
+            adapter.decide(
+                current: 2, dropped: 0, queueFill: 0,
+                now: start.addingTimeInterval(20)) == .hold, "still blocked")
+        check(
+            adapter.decide(
+                current: 2, dropped: 0, queueFill: 0,
+                now: start.addingTimeInterval(33)) == .up(1), "wait doubled")
     }
 
     test("a rung that never failed is still reachable") {
@@ -336,29 +369,36 @@ func bitrateCeilingTests() {
     test("the ceiling is never climbed above") {
         var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, ceilingRung: 4, upDwell: 0)
         for _ in 0..<5 {
-            check(adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold,
-                  "330 kbps is the ceiling")
+            check(
+                adapter.decide(current: 4, dropped: 0, queueFill: 0) == .hold,
+                "330 kbps is the ceiling")
         }
     }
 
     test("a higher ceiling is still reachable") {
         var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, ceilingRung: 1, upDwell: 0)
         check(adapter.decide(current: 2, dropped: 0, queueFill: 0) == .up(1))
-        check(adapter.decide(current: 1, dropped: 0, queueFill: 0) == .hold,
-              "660 kbps is the ceiling here")
+        check(
+            adapter.decide(current: 1, dropped: 0, queueFill: 0) == .hold,
+            "660 kbps is the ceiling here")
     }
 
     test("probing up needs a long clean stretch, not just a few windows") {
         // backoff 0: this test is about the dwell, not about the block on a failed rung.
-        var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 0, ceilingRung: 0,
-                                     upDwell: 20)
+        var adapter = BitrateAdapter(
+            upAfter: 1, minimumInterval: 0, backoff: 0, ceilingRung: 0,
+            upDwell: 20)
         let start = Date()
         // Start at 660 and fail: that records a change, so the dwell counts from here.
         check(adapter.decide(current: 1, dropped: 0.5, queueFill: 0, now: start) == .down(2))
-        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(5)) == .hold, "only 5 s clean")
-        check(adapter.decide(current: 2, dropped: 0, queueFill: 0,
-                             now: start.addingTimeInterval(25)) == .up(1), "20 s clean")
+        check(
+            adapter.decide(
+                current: 2, dropped: 0, queueFill: 0,
+                now: start.addingTimeInterval(5)) == .hold, "only 5 s clean")
+        check(
+            adapter.decide(
+                current: 2, dropped: 0, queueFill: 0,
+                now: start.addingTimeInterval(25)) == .up(1), "20 s clean")
     }
 }
 
@@ -411,29 +451,35 @@ func sharedRingTests() {
 func staleRingTests() {
     test("a backlog inside the ring is read, not thrown away") {
         // 5000 frames waiting is 104 ms: a normal cushion, not a backlog to discard.
-        let start = SharedRing.startIndex(written: 5000, read: 0, count: 512, staleAfterFrames: 2400)
+        let start = SharedRing.startIndex(
+            written: 5000, read: 0, count: 512, staleAfterFrames: 2400)
         check(start == 0, "started at \(start): the cushion is the point, not the problem")
         // Even far past the budget: the throttle will bring it down, the audio is still good.
-        let past = SharedRing.startIndex(written: 20_000, read: 0, count: 512,
-                                         staleAfterFrames: 2400)
+        let past = SharedRing.startIndex(
+            written: 20_000, read: 0, count: 512,
+            staleAfterFrames: 2400)
         check(past == 0, "started at \(past)")
     }
 
     test("a normal amount of audio is read from where it was left") {
-        let start = SharedRing.startIndex(written: 1000, read: 0, count: 512, staleAfterFrames: 2400)
+        let start = SharedRing.startIndex(
+            written: 1000, read: 0, count: 512, staleAfterFrames: 2400)
         check(start == 0, "started at \(start)")
-        let next = SharedRing.startIndex(written: 1512, read: 512, count: 512, staleAfterFrames: 2400)
+        let next = SharedRing.startIndex(
+            written: 1512, read: 512, count: 512, staleAfterFrames: 2400)
         check(next == 512, "started at \(next)")
     }
 
     test("a reader that fell a whole ring behind is pulled forward") {
         // The writer has overwritten what the reader was about to read: skip to the oldest audio
         // that still exists, which is a full ring back from the writer.
-        let start = SharedRing.startIndex(written: 100_000, read: 0, count: 512,
-                                          staleAfterFrames: 2400)
+        let start = SharedRing.startIndex(
+            written: 100_000, read: 0, count: 512,
+            staleAfterFrames: 2400)
         check(start == 100_000 - 48000, "started at \(start), expected a full ring back")
-        let far = SharedRing.startIndex(written: 200_000, read: 0, count: 100_000,
-                                        staleAfterFrames: 4_000_000)
+        let far = SharedRing.startIndex(
+            written: 200_000, read: 0, count: 100_000,
+            staleAfterFrames: 4_000_000)
         check(far == 200_000 - 48000, "started at \(far), expected a full ring back")
     }
 
@@ -496,8 +542,9 @@ func underrunTests() {
         }
         // A chunk of 2 frames out of a block of 4: the last two frames repeat 0.5, not 0.
         let out = fill(chunk: [0.1, 0.2, 0.3, 0.5], block: 4, last: 0)
-        check(out[4] == 0.5 && out[5] == 0.5 && out[6] == 0.5 && out[7] == 0.5,
-              "tail should hold, got \(out[4...7])")
+        check(
+            out[4] == 0.5 && out[5] == 0.5 && out[6] == 0.5 && out[7] == 0.5,
+            "tail should hold, got \(out[4...7])")
         // A completely empty chunk holds the previous block's last sample.
         let empty = fill(chunk: [], block: 2, last: -0.3)
         check(empty == [-0.3, -0.3, -0.3, -0.3], "\(empty)")
@@ -555,32 +602,32 @@ func adaptiveQueueTests() {
 func keeperDeviceTests() {
     test("a registered device reads as present") {
         let log = """
-        [com.apple.bluetooth:Server.Audio] -[AudioDeviceManager publishAndRegisterDeviceForUID:withArgs:device:] Register audio device 40:DC:A5:0E:14:48-tacl
-        """
+            [com.apple.bluetooth:Server.Audio] -[AudioDeviceManager publishAndRegisterDeviceForUID:withArgs:device:] Register audio device 40:DC:A5:0E:14:48-tacl
+            """
         check(AudioStreamKeeper.hasRegisteredDevice(log, uid: "40:DC:A5:0E:14:48-tacl"))
     }
 
     test("the takeover erasing it reads as absent") {
         let log = """
-        Register audio device 40:DC:A5:0E:14:48-tacl
-        Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map and marked the Audio Plugin ready for delete. Map now has 1 devices
-        """
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map and marked the Audio Plugin ready for delete. Map now has 1 devices
+            """
         check(!AudioStreamKeeper.hasRegisteredDevice(log, uid: "40:DC:A5:0E:14:48-tacl"))
     }
 
     test("the last word wins, because it comes and goes") {
         let log = """
-        Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
-        Register audio device 40:DC:A5:0E:14:48-tacl
-        """
+            Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            """
         check(AudioStreamKeeper.hasRegisteredDevice(log, uid: "40:DC:A5:0E:14:48-tacl"))
     }
 
     test("another device's lines do not count") {
         let log = """
-        Register audio device 40:DC:A5:0E:14:48-tsco
-        Erased 1 audio device 40:DC:A5:0E:14:48-taad from audio device map
-        """
+            Register audio device 40:DC:A5:0E:14:48-tsco
+            Erased 1 audio device 40:DC:A5:0E:14:48-taad from audio device map
+            """
         check(!AudioStreamKeeper.hasRegisteredDevice(log, uid: "40:DC:A5:0E:14:48-tacl"))
     }
 }
@@ -646,7 +693,8 @@ func pauseResumeTests() {
         check(dueAfter - dueBefore < 100, "no burst: \(dueAfter - dueBefore) frames due")
 
         // Without the shift the same instant would be 30 s ahead: 1.44M frames at once.
-        let dueWithout = Int((Double(afterResume - (start - pausedNanos)) / 1e9 + lead) * Double(rate))
+        let dueWithout = Int(
+            (Double(afterResume - (start - pausedNanos)) / 1e9 + lead) * Double(rate))
         check(dueWithout - dueBefore > 1_000_000, "the bug would be a 30 s burst")
     }
 }
@@ -674,11 +722,12 @@ func appPauseTests() {
         // alone underflowed a UInt64 and crashed (2026-11-06 19:30); jumping `position` to live
         // while restarting `start` at zero left nothing ever due, and the stream went silent for
         // 25 s (19:35).
-        var position2 = 0
+        let position2 = 0
         start = now
         due = Int((Double(now - start) / 1e9 + lead) * Double(rate))
-        check(due - position2 <= Int(lead * Double(rate)) + 1,
-              "no burst after the reset: \(due - position2) frames")
+        check(
+            due - position2 <= Int(lead * Double(rate)) + 1,
+            "no burst after the reset: \(due - position2) frames")
         check(due > position2, "and audio is due again immediately: \(due - position2)")
         check(now >= start, "the anchor is never ahead of now")
 
@@ -708,7 +757,9 @@ func volumeCurveTests() {
         check(half < 0.25, "half the slider is \(half), not 0.5")
         check(half > 0.1, "but not so quiet as to be useless: \(half)")
         // The first notch must be quiet, not already loud.
-        check(SystemVolume.applyCurve(0.0625) < 0.01, "one notch is \(SystemVolume.applyCurve(0.0625))")
+        check(
+            SystemVolume.applyCurve(0.0625) < 0.01,
+            "one notch is \(SystemVolume.applyCurve(0.0625))")
         // Monotonic, and clamped.
         var previous: Float = -1
         for i in 0...20 {
@@ -733,11 +784,13 @@ func volumeCurveTests() {
         // is the only conversion left. Half the slider is −32 dB, which is 0.025 in amplitude:
         // quiet, as the ear expects, not 0.5.
         check(SystemVolume.gain(fromDecibels: 0) == 1, "0 dB is unity")
-        check(SystemVolume.gain(fromDecibels: -6) > 0.49
-              && SystemVolume.gain(fromDecibels: -6) < 0.51, "−6 dB is about half")
+        check(
+            SystemVolume.gain(fromDecibels: -6) > 0.49
+                && SystemVolume.gain(fromDecibels: -6) < 0.51, "−6 dB is about half")
         check(SystemVolume.gain(fromDecibels: -20) < 0.11, "−20 dB is a tenth")
         check(SystemVolume.gain(fromDecibels: -64) == 0, "the bottom of the range is silence")
-        check(SystemVolume.gain(fromDecibels: -100) == 0, "below the range is silence, not negative")
+        check(
+            SystemVolume.gain(fromDecibels: -100) == 0, "below the range is silence, not negative")
         check(SystemVolume.gain(fromDecibels: 6) == 1, "above the range is clamped")
         // Half the slider on a −64…0 dB range is −32 dB.
         let halfSlider = SystemVolume.gain(fromDecibels: -32)
@@ -776,7 +829,10 @@ func resamplerTests() {
         // Two blocks of a ramp: the second must continue where the first stopped, not restart.
         let resampler = Resampler(from: 48000, to: 44100)
         var ramp = [Float](repeating: 0, count: 480 * 2)
-        for i in 0..<480 { ramp[i * 2] = Float(i) / 480; ramp[i * 2 + 1] = Float(i) / 480 }
+        for i in 0..<480 {
+            ramp[i * 2] = Float(i) / 480
+            ramp[i * 2 + 1] = Float(i) / 480
+        }
         let first = resampler.process(ramp)
         let second = resampler.process(ramp)
         let lastOfFirst = first[first.count - 2]
@@ -794,20 +850,20 @@ func resamplerTests() {
 func keeperAddressTests() {
     test("a different transport suffix is still recognised") {
         let log = """
-        Register audio device 40:DC:A5:0E:14:48-taad
-        """
-        check(AudioStreamKeeper.hasRegisteredDevice(log, uid: "40:DC:A5:0E:14:48-tacl"),
-              "matched on the address, not the suffix")
+            Register audio device 40:DC:A5:0E:14:48-taad
+            """
+        check(
+            AudioStreamKeeper.hasRegisteredDevice(log, uid: "40:DC:A5:0E:14:48-tacl"),
+            "matched on the address, not the suffix")
     }
 
     test("another device's registration is not ours") {
         let log = """
-        Register audio device AC:BD:70:5C:06:1C-tacl
-        """
+            Register audio device AC:BD:70:5C:06:1C-tacl
+            """
         check(!AudioStreamKeeper.hasRegisteredDevice(log, uid: "40:DC:A5:0E:14:48-tacl"))
     }
 }
-
 
 /// Latency is the cushion, and the cushion is the only lever: the headphones' buffer and the
 /// LDAC frame time are fixed. So it must start where a good link stays and widen only when a
@@ -846,9 +902,10 @@ func cushionAdaptationTests() {
 /// silently does nothing, which is the failure mode this whole feature exists to avoid.
 func launchAgentTests() {
     test("the plist carries the command, the address and the log") {
-        let plist = LaunchAgent.plist(executable: "/usr/local/bin/codecblue",
-                                      address: "40:DC:A5:0E:14:48",
-                                      arguments: ["--quality", "MQ"])
+        let plist = LaunchAgent.plist(
+            executable: "/usr/local/bin/codecblue",
+            address: "40:DC:A5:0E:14:48",
+            arguments: ["--quality", "MQ"])
         check(plist.contains("<string>/usr/local/bin/codecblue</string>"))
         check(plist.contains("<string>system</string>"))
         check(plist.contains("<string>40:DC:A5:0E:14:48</string>"))
@@ -867,16 +924,19 @@ func launchAgentTests() {
         // Since the level became a *ceiling* (2026-11-08), a pinned level no longer turns the
         // adapter off: the adapter is what keeps the stream below the ceiling when the link
         // cannot carry it, and that combination is the one that is safe to remember.
-        check(LaunchAgent.arguments(quality: "HQ", adapt: true, cushionMilliseconds: 40)
-              == ["--quality", "HQ", "--queue-ms", "40"],
-              "\(LaunchAgent.arguments(quality: "HQ", adapt: true, cushionMilliseconds: 40))")
+        check(
+            LaunchAgent.arguments(quality: "HQ", adapt: true, cushionMilliseconds: 40)
+                == ["--quality", "HQ", "--queue-ms", "40"],
+            "\(LaunchAgent.arguments(quality: "HQ", adapt: true, cushionMilliseconds: 40))")
         // The adapter off on purpose is remembered too, and it is the only thing that writes
         // `--no-adapt`.
-        check(LaunchAgent.arguments(quality: "HQ", adapt: false, cushionMilliseconds: 60)
-              == ["--quality", "HQ", "--no-adapt", "--queue-ms", "60"])
+        check(
+            LaunchAgent.arguments(quality: "HQ", adapt: false, cushionMilliseconds: 60)
+                == ["--quality", "HQ", "--no-adapt", "--queue-ms", "60"])
         check(LaunchAgent.arguments(quality: nil, adapt: true, cushionMilliseconds: nil).isEmpty)
-        check(LaunchAgent.arguments(quality: nil, adapt: false, cushionMilliseconds: nil)
-              == ["--no-adapt"])
+        check(
+            LaunchAgent.arguments(quality: nil, adapt: false, cushionMilliseconds: nil)
+                == ["--no-adapt"])
     }
 
     test("a rung the link cannot carry is not a preference, it is a fault") {
@@ -884,8 +944,9 @@ func launchAgentTests() {
         // 45% of the audio is thrown away — "inascoltabile". SQ asks 660 and drops 24%: still too
         // high. 330 drops nothing but leaves half the link unused. The answer is 492, which has no
         // name at all.
-        check(BitrateAdapter.fitRung(capacityKbps: 530) == 3,
-              "\(BitrateAdapter.fitRung(capacityKbps: 530))")
+        check(
+            BitrateAdapter.fitRung(capacityKbps: 530) == 3,
+            "\(BitrateAdapter.fitRung(capacityKbps: 530))")
         // 700 carried is 595 of budget, and 595 takes 492 but not 660. The headroom is not
         // decoration: a rung that exactly fills the link is the one that starts stalling.
         check(BitrateAdapter.fitRung(capacityKbps: 700) == 2)
@@ -911,21 +972,23 @@ func launchAgentTests() {
         var adapter = BitrateAdapter(upAfter: 1, minimumInterval: 0, upDwell: 0)
         adapter.noteTooHigh(0)
         // One rung up from 330 is 396, which was not abandoned: it is allowed.
-        check(adapter.decide(current: 4, dropped: 0, queueFill: 0.1) == .up(3),
-              "\(adapter.decide(current: 4, dropped: 0, queueFill: 0.1))")
+        check(
+            adapter.decide(current: 4, dropped: 0, queueFill: 0.1) == .up(3),
+            "\(adapter.decide(current: 4, dropped: 0, queueFill: 0.1))")
         // And the abandoned rung stays abandoned: a clean stretch does not make 990 fit a link
         // that has already shown it does not.
         var blocked = BitrateAdapter(upAfter: 1, minimumInterval: 0, backoff: 600, upDwell: 0)
         blocked.noteTooHigh(0)
         var rung = 4
         for _ in 0..<3 {
-            if case let .up(next) = blocked.decide(current: rung, dropped: 0, queueFill: 0.1) {
+            if case .up(let next) = blocked.decide(current: rung, dropped: 0, queueFill: 0.1) {
                 rung = next
             }
         }
         check(rung == 1, "it may climb to 660, not to 990: \(rung)")
-        check(blocked.decide(current: 1, dropped: 0, queueFill: 0.1) == .hold,
-              "\(blocked.decide(current: 1, dropped: 0, queueFill: 0.1))")
+        check(
+            blocked.decide(current: 1, dropped: 0, queueFill: 0.1) == .hold,
+            "\(blocked.decide(current: 1, dropped: 0, queueFill: 0.1))")
     }
 
     test("the five ABR steps are reachable, and they are the ones between the three names") {
@@ -935,12 +998,14 @@ func launchAgentTests() {
         // SQ instead of 330 kbps away from it.
         // `get_bitrate` reports the last frame encoded, so the ladder is read by encoding one
         // frame per step — that is `LDACEncoder.ladder`, and this test holds it still.
-        check(LDACEncoder.ladder(sampleRate: 48000) == [990, 660, 492, 396, 330],
-              "\(LDACEncoder.ladder(sampleRate: 48000))")
+        check(
+            LDACEncoder.ladder(sampleRate: 48000) == [990, 660, 492, 396, 330],
+            "\(LDACEncoder.ladder(sampleRate: 48000))")
         // At 44.1 kHz the same five rungs are 909 / 606 / 452 / 363 / 303 — 363 and not 364,
         // because the frame length is a whole number of bytes and the bitrate is derived from it.
-        check(LDACEncoder.ladder(sampleRate: 44100) == [909, 606, 452, 363, 303],
-              "\(LDACEncoder.ladder(sampleRate: 44100))")
+        check(
+            LDACEncoder.ladder(sampleRate: 44100) == [909, 606, 452, 363, 303],
+            "\(LDACEncoder.ladder(sampleRate: 44100))")
         // The floor is the floor: stepping down from LQ is refused, not wrapped to 990.
         let encoder = try! LDACEncoder(sampleRate: 48000, level: .mq, mtu: 679)
         check(encoder.stepDown() == false, "the ladder does not wrap")
@@ -978,14 +1043,16 @@ func launchAgentTests() {
         // menu has to be able to offer them or the stream has nothing to settle on.
         let levels = QualityLevels.describe(capacityKbps: 530)
         check(levels.map(\.rung) == [0, 1, 2, 3, 4], "\(levels.map(\.rung))")
-        check(levels.map(\.nominalKbps) == [990, 660, 492, 396, 330],
-              "\(levels.map(\.nominalKbps))")
+        check(
+            levels.map(\.nominalKbps) == [990, 660, 492, 396, 330],
+            "\(levels.map(\.nominalKbps))")
         // The named rungs keep their names; the unnamed ones are identified by their bitrate.
         check(levels.map(\.name) == ["HQ", "SQ", "492", "396", "LQ"], "\(levels.map(\.name))")
         check(levels.map(\.longName) == ["High", "Standard", "492 kbps", "396 kbps", "Low"])
         // 530 carried is 450 of budget: 396 and 330 fit, 492 does not.
-        check(levels.map(\.fits) == [false, false, false, true, true],
-              "\(levels.map(\.fits))")
+        check(
+            levels.map(\.fits) == [false, false, false, true, true],
+            "\(levels.map(\.fits))")
         // And the tick is on the highest rung that fits — 396, not 330, and not 492.
         check(levels.filter(\.chosen).map(\.rung) == [3], "\(levels.filter(\.chosen).map(\.rung))")
         // A link that carries nothing yet claims nothing: a menu that guesses is worse than one
@@ -996,25 +1063,29 @@ func launchAgentTests() {
         // A ceiling above what the link carries says what it will actually give: the rung that
         // fits. "990 kbps · too much for this link" is true and useless; "here 396 kbps" is the
         // same fact and answers the question the listener is asking.
-        check(QualityLevels.menuLabel(levels[0], capacityKbps: 530)
-              == "High · 990 kbps · here 396 kbps",
-              "\(QualityLevels.menuLabel(levels[0], capacityKbps: 530))")
+        check(
+            QualityLevels.menuLabel(levels[0], capacityKbps: 530)
+                == "High · 990 kbps · here 396 kbps",
+            "\(QualityLevels.menuLabel(levels[0], capacityKbps: 530))")
         check(QualityLevels.menuLabel(levels[4], capacityKbps: 530) == "Low · 330 kbps")
-        check(QualityLevels.menuLabel(levels[3], capacityKbps: 530) == "✓ 396 kbps",
-              "\(QualityLevels.menuLabel(levels[3], capacityKbps: 530))")
+        check(
+            QualityLevels.menuLabel(levels[3], capacityKbps: 530) == "✓ 396 kbps",
+            "\(QualityLevels.menuLabel(levels[3], capacityKbps: 530))")
         // A ceiling *below* what fits is honoured: asking for Low on a fast link gives Low, not the
         // best the link could do. A ceiling is a limit, and a limit the program ignores is not a
         // setting.
-        check(QualityLevels.wouldUse(levels[4], capacityKbps: 1300) == 330,
-              "\(QualityLevels.wouldUse(levels[4], capacityKbps: 1300) ?? -1)")
+        check(
+            QualityLevels.wouldUse(levels[4], capacityKbps: 1300) == 330,
+            "\(QualityLevels.wouldUse(levels[4], capacityKbps: 1300) ?? -1)")
         check(QualityLevels.wouldUse(levels[0], capacityKbps: 1300) == 990)
         check(QualityLevels.wouldUse(levels[0], capacityKbps: 530) == 396)
         // Nothing measured yet: no claim, and the label falls back to the nominal bitrate.
         check(QualityLevels.wouldUse(levels[0], capacityKbps: 0) == nil)
         check(QualityLevels.menuLabel(levels[0], capacityKbps: 0) == "High · 990 kbps")
         // The bitrates come from the encoder, so the rate changes them.
-        check(QualityLevels.describe(capacityKbps: 530, sampleRate: 44100).map(\.nominalKbps)
-              == [909, 606, 452, 363, 303])
+        check(
+            QualityLevels.describe(capacityKbps: 530, sampleRate: 44100).map(\.nominalKbps)
+                == [909, 606, 452, 363, 303])
     }
 
     test("a rung can be named or numbered, and the number reaches the unnamed ones") {
@@ -1041,8 +1112,9 @@ func launchAgentTests() {
         // The measurements this rule is built on, 2026-11-08:
         //   LQM off, 336 kbps asked: 2 packets per drain, 29% dropped, socket full in every window.
         //   LQM on,  336 kbps asked: no refusal at all, 73 windows in a row, 99.89% of real time.
-        check(LinkQuality.judge(stalls: 88, burst: 2, sentPackets: true) == .off,
-              "\(LinkQuality.judge(stalls: 88, burst: 2, sentPackets: true))")
+        check(
+            LinkQuality.judge(stalls: 88, burst: 2, sentPackets: true) == .off,
+            "\(LinkQuality.judge(stalls: 88, burst: 2, sentPackets: true))")
         check(LinkQuality.judge(stalls: 0, burst: 499, sentPackets: true) == .on)
         // A refusal with a wide burst is still on: the ceiling was above what was asked, and the
         // refusal was the link, not the mode.
@@ -1052,7 +1124,8 @@ func launchAgentTests() {
     }
 
     test("the plist parses as a property list") {
-        let plist = LaunchAgent.plist(executable: "/tmp/a b/codecblue", address: "AA:BB:CC:DD:EE:FF")
+        let plist = LaunchAgent.plist(
+            executable: "/tmp/a b/codecblue", address: "AA:BB:CC:DD:EE:FF")
         let data = Data(plist.utf8)
         var format = PropertyListSerialization.PropertyListFormat.xml
         let parsed = try? PropertyListSerialization.propertyList(
@@ -1072,7 +1145,8 @@ func launchAgentTests() {
 
     test("values that would break the XML are escaped") {
         // A path with an ampersand is legal on macOS and would make the plist unparseable.
-        let plist = LaunchAgent.plist(executable: "/tmp/a&b/codecblue", address: "AA:BB:CC:DD:EE:FF")
+        let plist = LaunchAgent.plist(
+            executable: "/tmp/a&b/codecblue", address: "AA:BB:CC:DD:EE:FF")
         check(plist.contains("a&amp;b"), "escaped")
         let data = Data(plist.utf8)
         var format = PropertyListSerialization.PropertyListFormat.xml
@@ -1226,7 +1300,9 @@ func drainServoTests() {
             total += extra
         }
         let expected = Int(block * boost * 1000)
-        check(abs(total - expected) <= 1, "\(total) extra frames over 1000 blocks, expected \(expected)")
+        check(
+            abs(total - expected) <= 1,
+            "\(total) extra frames over 1000 blocks, expected \(expected)")
     }
 }
 
@@ -1240,8 +1316,9 @@ func avrcpCommandTests() {
         let press: [UInt8] = [0x00, 0x11, 0x0E, 0x00, 0x00, 0x7C, 0x41]
         check(AVCTPHolder.interpret(press) == .key("volume_up"), "volume up")
         let release: [UInt8] = [0x00, 0x11, 0x0E, 0x00, 0x00, 0x7C, 0xC1]
-        check(AVCTPHolder.interpret(release) == .unsupported,
-              "a release must not fire the key a second time")
+        check(
+            AVCTPHolder.interpret(release) == .unsupported,
+            "a release must not fire the key a second time")
         let down: [UInt8] = [0x00, 0x11, 0x0E, 0x00, 0x00, 0x7C, 0x42]
         check(AVCTPHolder.interpret(down) == .key("volume_down"), "volume down")
     }
@@ -1266,10 +1343,12 @@ func avrcpCommandTests() {
 
     test("a short or unknown command is refused rather than guessed") {
         check(AVCTPHolder.interpret([0x00, 0x11, 0x0E]) == .unsupported, "too short")
-        check(AVCTPHolder.interpret([0x00, 0x11, 0x0E, 0x00, 0x00, 0x7C, 0x99]) == .unsupported,
-              "unknown key code")
-        check(AVCTPHolder.interpret([0x00, 0x11, 0x0E, 0x00, 0x00, 0x10, 0x00]) == .unsupported,
-              "GET CAPABILITIES is not a key")
+        check(
+            AVCTPHolder.interpret([0x00, 0x11, 0x0E, 0x00, 0x00, 0x7C, 0x99]) == .unsupported,
+            "unknown key code")
+        check(
+            AVCTPHolder.interpret([0x00, 0x11, 0x0E, 0x00, 0x00, 0x10, 0x00]) == .unsupported,
+            "GET CAPABILITIES is not a key")
     }
 }
 
@@ -1283,8 +1362,10 @@ func avrcpFrameTests() {
     test("a volume notification is read from the frame the headphones actually send") {
         // Measured 2026-11-06: `12 11 0E 0F 48 00 00 19 58 31 00 00 02 0D 17`
         //   ctype 0x0F INTERIM, PDU 0x31 REGISTER NOTIFICATION, length 2, event 0x0D, value 0x17
-        let frame: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
-                              0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
+        let frame: [UInt8] = [
+            0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x31, 0x00, 0x00, 0x02, 0x0D, 0x17,
+        ]
         check(frame.count == 15, "the frame is 15 bytes, not 17")
         check(frame[9] == 0x31, "PDU is REGISTER NOTIFICATION")
         check(frame[13] == 0x0D, "event is VOLUME CHANGED")
@@ -1294,8 +1375,10 @@ func avrcpFrameTests() {
 
     test("every vendor dependent PDU carries a two-byte length") {
         // SET ABSOLUTE VOLUME at 30%: PDU 0x50, reserved, length 1, operand 0x26.
-        let set: [UInt8] = [0x20, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
-                            0x50, 0x00, 0x00, 0x01, 0x26]
+        let set: [UInt8] = [
+            0x20, 0x11, 0x0E, 0x00, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x50, 0x00, 0x00, 0x01, 0x26,
+        ]
         check(set[9] == 0x50, "PDU")
         check(set[11] << 8 | set[12] == 1, "length is one operand")
         check(set[13] == 0x26, "0x26 is 38 of 127, which is 30%")
@@ -1316,8 +1399,10 @@ func avrcpFrameTests() {
 
     test("GET CAPABILITIES is recognised, with its id at byte 13") {
         // `10 11 0E 01 48 00 00 19 58 10 00 00 01 03` — the id is the last byte, not byte 10.
-        let frame: [UInt8] = [0x10, 0x11, 0x0E, 0x01, 0x48, 0x00, 0x00, 0x19, 0x58,
-                              0x10, 0x00, 0x00, 0x01, 0x03]
+        let frame: [UInt8] = [
+            0x10, 0x11, 0x0E, 0x01, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x10, 0x00, 0x00, 0x01, 0x03,
+        ]
         check(AVCTPHolder.interpret(frame) == .getCapabilities(0x03), "events supported")
         // Reading byte 10 would give 0x00 — the reserved byte — and answer an empty list.
         check(frame[10] == 0x00, "byte 10 is the reserved byte, which is the trap")
@@ -1330,28 +1415,37 @@ func avrcpFrameTests() {
 /// event was being swallowed by the frame in front of it.
 func avctpFramingTests() {
     test("two frames in one read are cut apart") {
-        let capabilities: [UInt8] = [0x10, 0x11, 0x0E, 0x01, 0x48, 0x00, 0x00, 0x19, 0x58,
-                                     0x10, 0x00, 0x00, 0x01, 0x03]
-        let notification: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
-                                     0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
+        let capabilities: [UInt8] = [
+            0x10, 0x11, 0x0E, 0x01, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x10, 0x00, 0x00, 0x01, 0x03,
+        ]
+        let notification: [UInt8] = [
+            0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x31, 0x00, 0x00, 0x02, 0x0D, 0x17,
+        ]
         let both = capabilities + notification
         check(AVCTPHolder.frameLength(both) == 14, "the first frame is 14 bytes")
         check(AVCTPHolder.frameLength(Array(both[14...])) == 15, "the second is 15")
     }
 
     test("a partial frame is not parsed") {
-        let notification: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
-                                     0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
-        check(AVCTPHolder.frameLength(Array(notification[0..<10])) == nil,
-              "half a frame must wait for the rest")
+        let notification: [UInt8] = [
+            0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x31, 0x00, 0x00, 0x02, 0x0D, 0x17,
+        ]
+        check(
+            AVCTPHolder.frameLength(Array(notification[0..<10])) == nil,
+            "half a frame must wait for the rest")
         check(AVCTPHolder.frameLength(notification) == 15, "the whole frame is 15")
     }
 
     test("the ctype is byte 3, not anything in the AVCTP header") {
         // The header holds the label, the packet type, C/R and IPID. Reading `header >> 2 & 0x03`
         // gives 0 for every frame, which is why the re-registration never ran.
-        let interim: [UInt8] = [0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
-                                0x31, 0x00, 0x00, 0x02, 0x0D, 0x17]
+        let interim: [UInt8] = [
+            0x12, 0x11, 0x0E, 0x0F, 0x48, 0x00, 0x00, 0x19, 0x58,
+            0x31, 0x00, 0x00, 0x02, 0x0D, 0x17,
+        ]
         check(interim[3] == 0x0F, "INTERIM")
         check((interim[0] >> 2) & 0x03 == 0, "the header says packet type 0, which is not 0x0F")
         var changed = interim
@@ -1366,8 +1460,10 @@ func avctpFramingTests() {
 func avrcpNotificationTests() {
     test("INTERIM confirms, CHANGED acts") {
         func frame(ctype: UInt8, value: UInt8) -> [UInt8] {
-            [0x12, 0x11, 0x0E, ctype, 0x48, 0x00, 0x00, 0x19, 0x58,
-             0x31, 0x00, 0x00, 0x02, 0x0D, value]
+            [
+                0x12, 0x11, 0x0E, ctype, 0x48, 0x00, 0x00, 0x19, 0x58,
+                0x31, 0x00, 0x00, 0x02, 0x0D, value,
+            ]
         }
         check(frame(ctype: 0x0F, value: 0x17)[3] == 0x0F, "INTERIM")
         check(frame(ctype: 0x0D, value: 0x19)[3] == 0x0D, "CHANGED")
@@ -1458,35 +1554,36 @@ func controlChannelTests() {
 /// tracked and tested.
 func headphoneListTests() {
     let sample = """
-          Bluetooth:
+        Bluetooth:
 
-              Devices (Paired, Configured, etc.):
-                  HUAWEI FreeBuds 5:
-                      Address: 40:DC:A5:0E:14:48
-                      Vendor ID: 0x027D
-                      Minor Type: Headphones
+            Devices (Paired, Configured, etc.):
+                HUAWEI FreeBuds 5:
+                    Address: 40:DC:A5:0E:14:48
+                    Vendor ID: 0x027D
+                    Minor Type: Headphones
 
-          Connected:
-              Keychron K3 Pro:
-                  Address: 6C:93:08:61:BB:D9
-                  Minor Type: Keyboard
-              HUAWEI FreeBuds 5:
-                  Address: 40:DC:A5:0E:14:48
-                  Minor Type: Headphones
+        Connected:
+            Keychron K3 Pro:
+                Address: 6C:93:08:61:BB:D9
+                Minor Type: Keyboard
+            HUAWEI FreeBuds 5:
+                Address: 40:DC:A5:0E:14:48
+                Minor Type: Headphones
 
-          Not Connected:
-              FreeBuds 3:
-                  Address: AA:BB:CC:DD:EE:FF
-                  Minor Type: Headphones
-              MX Master 3S:
-                  Address: D1:52:01:D5:79:C3
-                  Minor Type: Mouse
+        Not Connected:
+            FreeBuds 3:
+                Address: AA:BB:CC:DD:EE:FF
+                Minor Type: Headphones
+            MX Master 3S:
+                Address: D1:52:01:D5:79:C3
+                Minor Type: Mouse
 
-          """
+        """
     test("a device is listed once, with the section it is in") {
         let devices = BluetoothHeadphone.parse(sample)
         let freeBuds = devices.filter { $0.address == "40:DC:A5:0E:14:48" }
-        check(freeBuds.count == 1, "the paired listing must not be counted twice: \(freeBuds.count)")
+        check(
+            freeBuds.count == 1, "the paired listing must not be counted twice: \(freeBuds.count)")
         check(freeBuds.first?.isConnected == true, "it is in Connected")
         check(freeBuds.first?.name == "HUAWEI FreeBuds 5", freeBuds.first?.name ?? "nil")
     }
@@ -1495,24 +1592,29 @@ func headphoneListTests() {
         let devices = BluetoothHeadphone.parse(sample)
         let old = devices.first { $0.address == "AA:BB:CC:DD:EE:FF" }
         check(old != nil, "it is still listed")
-        check(old?.isConnected == false, "but not connected — the mistake was reading it as present")
+        check(
+            old?.isConnected == false, "but not connected — the mistake was reading it as present")
     }
 
     test("only audio devices are offered") {
         let audio = BluetoothHeadphone.parse(sample).filter(\.isAudio)
-        check(audio.count == 2, "two pairs of headphones, not the keyboard or the mouse: \(audio.count)")
+        check(
+            audio.count == 2,
+            "two pairs of headphones, not the keyboard or the mouse: \(audio.count)")
         check(!audio.contains { $0.kind == "Keyboard" }, "no keyboard")
         check(!audio.contains { $0.kind == "Mouse" }, "no mouse")
     }
 
     test("the kind test covers the words Apple uses") {
         for kind in ["Headphones", "Headset", "Speaker", "Earbuds", "AirPods"] {
-            check(BluetoothHeadphone(name: "x", address: "y", isConnected: true, kind: kind).isAudio,
-                  kind)
+            check(
+                BluetoothHeadphone(name: "x", address: "y", isConnected: true, kind: kind).isAudio,
+                kind)
         }
         for kind in ["Keyboard", "Mouse", "Trackpad", "Gamepad"] {
-            check(!BluetoothHeadphone(name: "x", address: "y", isConnected: true, kind: kind).isAudio,
-                  kind)
+            check(
+                !BluetoothHeadphone(name: "x", address: "y", isConnected: true, kind: kind).isAudio,
+                kind)
         }
     }
 }
@@ -1546,34 +1648,42 @@ func launchAgentAppTests() {
         try? FileManager.default.createDirectory(at: stable, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let invoked = out.appendingPathComponent("codecblue")
-        FileManager.default.createFile(atPath: invoked.path, contents: Data("#!/bin/sh\n".utf8),
-                                       attributes: [.posixPermissions: 0o755])
-        FileManager.default.createFile(atPath: stable.appendingPathComponent("codecblue").path,
-                                       contents: Data("#!/bin/sh\n".utf8),
-                                       attributes: [.posixPermissions: 0o755])
+        FileManager.default.createFile(
+            atPath: invoked.path, contents: Data("#!/bin/sh\n".utf8),
+            attributes: [.posixPermissions: 0o755])
+        FileManager.default.createFile(
+            atPath: stable.appendingPathComponent("codecblue").path,
+            contents: Data("#!/bin/sh\n".utf8),
+            attributes: [.posixPermissions: 0o755])
         let absent = URL(fileURLWithPath: "/nowhere/Applications/CodecBlue/codecblue")
         let resolved = LaunchAgent.resolveExecutable(from: invoked, installed: absent)
         check(!resolved.contains("/.build/out/"), "never SwiftPM's internal directory: \(resolved)")
-        check(resolved == stable.appendingPathComponent("codecblue").path,
-              "the stable symlink wins over the products directory: \(resolved)")
+        check(
+            resolved == stable.appendingPathComponent("codecblue").path,
+            "the stable symlink wins over the products directory: \(resolved)")
         // And when an installed copy exists, it wins over everything — including a checkout.
         let installed = root.appendingPathComponent("Applications/CodecBlue/codecblue")
-        try? FileManager.default.createDirectory(at: installed.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: installed.path, contents: Data("#!/bin/sh\n".utf8),
-                                       attributes: [.posixPermissions: 0o755])
-        check(LaunchAgent.resolveExecutable(from: invoked, installed: installed) == installed.path,
-              "the installed copy wins when it is there")
+        try? FileManager.default.createDirectory(
+            at: installed.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        FileManager.default.createFile(
+            atPath: installed.path, contents: Data("#!/bin/sh\n".utf8),
+            attributes: [.posixPermissions: 0o755])
+        check(
+            LaunchAgent.resolveExecutable(from: invoked, installed: installed) == installed.path,
+            "the installed copy wins when it is there")
         // With nothing anywhere, the honest answer is the path it was given: a wrong path in the
         // plist is a "no such file" at login, and inventing a better-looking one would hide that.
         let empty = URL(fileURLWithPath: "/tmp/codecblue-selftest-empty-\(getpid())/codecblue")
-        check(LaunchAgent.resolveExecutable(from: empty, installed: absent) == empty.path,
-              "an honest fallback")
+        check(
+            LaunchAgent.resolveExecutable(from: empty, installed: absent) == empty.path,
+            "an honest fallback")
     }
 
     test("the plist carries the address and the arguments") {
-        let text = LaunchAgent.plist(executable: "/bin/echo", address: "40:DC:A5:0E:14:48",
-                                     arguments: ["--quality", "MQ"])
+        let text = LaunchAgent.plist(
+            executable: "/bin/echo", address: "40:DC:A5:0E:14:48",
+            arguments: ["--quality", "MQ"])
         check(text.contains("<string>40:DC:A5:0E:14:48</string>"), "the address")
         check(text.contains("<string>--quality</string>"), "the option")
         check(text.contains("<string>MQ</string>"), "its value")
@@ -1583,7 +1693,8 @@ func launchAgentAppTests() {
 
     test("a path with an ampersand still parses") {
         // A plist that will not parse is a LaunchAgent that silently does nothing.
-        let text = LaunchAgent.plist(executable: "/Users/a&b/codecblue", address: "AA:BB:CC:DD:EE:FF")
+        let text = LaunchAgent.plist(
+            executable: "/Users/a&b/codecblue", address: "AA:BB:CC:DD:EE:FF")
         check(text.contains("a&amp;b"), "escaped")
         check(!text.contains("/Users/a&b/"), "not raw")
         let data = Data(text.utf8)
@@ -1594,9 +1705,13 @@ func launchAgentAppTests() {
     test("loading unloads first, so a rewritten plist takes effect") {
         // `launchctl load` on an already-loaded label is a no-op: after rewriting the plist for a
         // different pair, loading alone would keep the old address running.
-        let source = try? String(contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift",
-                                 encoding: .utf8)
-        guard let source else { check(false, "source not readable"); return }
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift",
+            encoding: .utf8)
+        guard let source else {
+            check(false, "source not readable")
+            return
+        }
         let loadBody = source.components(separatedBy: "public static func load() throws {")
         check(loadBody.count == 2, "load() found")
         let body = loadBody[1].prefix(300)
@@ -1614,7 +1729,10 @@ func sampleRateTests() {
         // The ring is sized for 96 kHz. A higher rate would run it dry; a lower one only wastes
         // space. The C side cannot report an error, so the bound lives in Swift.
         let ring = try? SharedRing()
-        guard let ring else { check(true, "no driver running, nothing to check"); return }
+        guard let ring else {
+            check(true, "no driver running, nothing to check")
+            return
+        }
         let before = ring.sampleRate
         ring.setSampleRate(44100)
         check(ring.sampleRate == 44100, "accepted")
@@ -1655,7 +1773,8 @@ func installLayoutTests() {
         // anyone cleans. The installed copy is the one that survives.
         let invoked = URL(fileURLWithPath: "/repo/.build/debug/codecblue")
         let resolved = LaunchAgent.resolveExecutable(
-            from: invoked, installed: URL(fileURLWithPath: "/nowhere/Applications/CodecBlue/codecblue"))
+            from: invoked,
+            installed: URL(fileURLWithPath: "/nowhere/Applications/CodecBlue/codecblue"))
         // What must never happen is a path into .build/out, which SwiftPM deletes; and with
         // nothing installed the answer is the .build/debug path it was given, which is the stable
         // symlink SwiftPM maintains. Passed in, not discovered: see the note in
@@ -1691,7 +1810,7 @@ func iconTests() {
         check(FileManager.default.fileExists(atPath: script.path), "the script is in the repo")
         let icns = root.appendingPathComponent("Resources/AppIcon.icns")
         if FileManager.default.fileExists(atPath: icns.path) {
-            let size = (try? FileManager.default.attributesOfItem(atPath: icns.path)[.size] as? Int) ?? 0
+            let size = (try? FileManager.default.attributesOfItem(atPath: icns.path)[.size]) as? Int
             check((size ?? 0) > 1000, "the .icns has content: \(size ?? 0) bytes")
         } else {
             check(true, "not generated yet — scripts/make-icon.py makes it")
@@ -1740,7 +1859,8 @@ func cushionRetuneTests() {
         check(queue.count == before, "no packet is discarded by retuning")
         // And the floor is what it relaxes towards.
         while queue.relax() {}
-        check(abs(queue.maxDuration - 0.030) < 1e-9, "relaxes to the new floor: \(queue.maxDuration)")
+        check(
+            abs(queue.maxDuration - 0.030) < 1e-9, "relaxes to the new floor: \(queue.maxDuration)")
     }
 
     test("the ceiling is never below the floor") {
@@ -1824,8 +1944,9 @@ func volumeAndMuteTests() {
         check(text.contains("MRMediaRemoteSendCommand"), "it can send explicit commands")
         check(text.contains("case pause = 1"), "pause is its own command")
         check(text.contains("case play = 0"), "and so is play")
-        check(text.contains("if !MediaRemote.send(.pause) { post(.playPause) }"),
-              "with the HID toggle as the fallback, not the only path")
+        check(
+            text.contains("if !MediaRemote.send(.pause) { post(.playPause) }"),
+            "with the HID toggle as the fallback, not the only path")
     }
 }
 
@@ -1866,10 +1987,12 @@ func volumeEchoTests() {
             return
         }
         check(text.contains("return volume.isMuted ? 0 : 1"), "the gain is a mute")
-        check(!text.contains("streamer.gain = { volume?.gain ?? 1 }"),
-              "and the decibel curve is not applied here")
-        check(text.contains("volume?.notePushed(position)"),
-              "what is pushed is remembered, so the echo can be recognised")
+        check(
+            !text.contains("streamer.gain = { volume?.gain ?? 1 }"),
+            "and the decibel curve is not applied here")
+        check(
+            text.contains("volume?.notePushed(position)"),
+            "what is pushed is remembered, so the echo can be recognised")
     }
 
     test("the driver's mute control answers on the device too") {
@@ -1884,8 +2007,9 @@ func volumeEchoTests() {
             return
         }
         check(text.contains("kAudioBooleanControlClassID"), "the control declares its class")
-        check(text.contains("kMuteControlID, 1, &changed"),
-              "and the change is announced on the control")
+        check(
+            text.contains("kMuteControlID, 1, &changed"),
+            "and the change is announced on the control")
     }
 }
 
@@ -1906,11 +2030,13 @@ func bluetoothAuthorizationTests() {
             check(false, "main.swift not readable")
             return
         }
-        check(text.contains("BluetoothAuthorization.request(log: log)"),
-              "playSystem asks before touching bluetoothd")
+        check(
+            text.contains("BluetoothAuthorization.request(log: log)"),
+            "playSystem asks before touching bluetoothd")
         // And before the ring, which is where the first bluetoothd call happens.
         if let ask = text.range(of: "BluetoothAuthorization.request(log: log)"),
-           let ring = text.range(of: "ring = try SharedRing()") {
+            let ring = text.range(of: "ring = try SharedRing()")
+        {
             check(ask.lowerBound < ring.lowerBound, "the asking comes first")
         } else {
             check(false, "both markers found")
@@ -1922,8 +2048,9 @@ func bluetoothAuthorizationTests() {
         // no run loop for the main queue — yet bluetoothd's approval goes from 1 to 2 and the
         // classic channel works. So the wait is a courtesy, not a requirement, and a long one
         // would be two seconds of silence at every start for nothing.
-        check(BluetoothAuthorization.timeout <= 3,
-              "a short wait: \(BluetoothAuthorization.timeout) s")
+        check(
+            BluetoothAuthorization.timeout <= 3,
+            "a short wait: \(BluetoothAuthorization.timeout) s")
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let source = root.appendingPathComponent(
@@ -1932,8 +2059,9 @@ func bluetoothAuthorizationTests() {
             check(false, "not readable")
             return
         }
-        check(text.contains("CBCentralManager(delegate: self, queue: nil)"),
-              "a manager is created, which is what triggers the request")
+        check(
+            text.contains("CBCentralManager(delegate: self, queue: nil)"),
+            "a manager is created, which is what triggers the request")
         check(text.contains("carrying on"), "and a missing answer is not treated as a failure")
     }
 
@@ -1972,8 +2100,9 @@ func headphoneButtonTests() {
             return
         }
         check(text.contains("mediaKeys.send(\"toggle\")"), "the button toggles")
-        check(!text.contains("let command = key == \"stop\" ? \"pause\" : key"),
-              "and no longer forwards the headphone's own word for it")
+        check(
+            !text.contains("let command = key == \"stop\" ? \"pause\" : key"),
+            "and no longer forwards the headphone's own word for it")
     }
 
     test("the toggle is the HID key, not a MediaRemote command") {
@@ -1989,13 +2118,15 @@ func headphoneButtonTests() {
             return
         }
         if let toggle = text.range(of: "case \"toggle\":"),
-           let post = text.range(of: "post(.playPause)", range: toggle.upperBound..<text.endIndex) {
+            let post = text.range(of: "post(.playPause)", range: toggle.upperBound..<text.endIndex)
+        {
             check(post.lowerBound > toggle.lowerBound, "toggle posts the HID key")
         } else {
             check(false, "toggle case found")
         }
-        check(text.contains("nowPlayingPID=0") || text.contains("registered Now"),
-              "and the reason is written down")
+        check(
+            text.contains("nowPlayingPID=0") || text.contains("registered Now"),
+            "and the reason is written down")
     }
 }
 
@@ -2018,8 +2149,9 @@ func mediaKeyDestinationTests() {
             check(false, "not readable")
             return
         }
-        check(text.contains("MRMediaRemoteGetNowPlayingApplicationPID"),
-              "it asks who would receive the key")
+        check(
+            text.contains("MRMediaRemoteGetNowPlayingApplicationPID"),
+            "it asks who would receive the key")
         check(text.contains("no now-playing client"), "and says so when nobody would")
     }
 

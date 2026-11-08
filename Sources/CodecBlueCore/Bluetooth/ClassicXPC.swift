@@ -22,13 +22,13 @@ public enum ClassicXPCError: Error, CustomStringConvertible, Equatable {
 
     public var description: String {
         switch self {
-        case let .connectionLost(why): "connection to bluetoothd lost (\(why))"
-        case let .timeout(what): "bluetoothd did not answer: \(what)"
-        case let .refused(code): "refused by bluetoothd or the headphones (result \(code))"
+        case .connectionLost(let why): "connection to bluetoothd lost (\(why))"
+        case .timeout(let what): "bluetoothd did not answer: \(what)"
+        case .refused(let code): "refused by bluetoothd or the headphones (result \(code))"
         case .notReady: "Bluetooth is not powered on"
         case .powerOff: "Bluetooth is switched off"
-        case let .unknownDevice(address): "bluetoothd does not know \(address)"
-        case let .malformedReply(what): "unexpected reply from bluetoothd: \(what)"
+        case .unknownDevice(let address): "bluetoothd does not know \(address)"
+        case .malformedReply(let what): "unexpected reply from bluetoothd: \(what)"
         }
     }
 }
@@ -44,7 +44,9 @@ public struct DeviceRecord: Sendable, CustomStringConvertible {
     public var isLinkUp: Bool { linkState == 2 }
 
     public var description: String {
-        let list = services.map { String(format: "0x%04X%@", $0.uuid16, $0.rfcomm > 0 ? "/rfcomm \($0.rfcomm)" : "") }
+        let list = services.map {
+            String(format: "0x%04X%@", $0.uuid16, $0.rfcomm > 0 ? "/rfcomm \($0.rfcomm)" : "")
+        }
         return "device \(uuid) link=\(linkState) services=[\(list.joined(separator: ", "))]"
     }
 }
@@ -97,7 +99,8 @@ public final class XPCProbe: @unchecked Sendable {
         let args = xpc_dictionary_create(nil, nil, 0)
         if let device {
             withUnsafeBytes(of: device.uuid) { raw in
-                xpc_dictionary_set_uuid(args, XPCKey.deviceUUID, raw.bindMemory(to: UInt8.self).baseAddress!)
+                xpc_dictionary_set_uuid(
+                    args, XPCKey.deviceUUID, raw.bindMemory(to: UInt8.self).baseAddress!)
             }
         }
         for (key, value) in arguments { xpc_dictionary_set_int64(args, key, value) }
@@ -202,7 +205,8 @@ public final class ClassicXPCSession: @unchecked Sendable {
         // it, and keeping it would make the retry above fail instantly with the old error.
         failure = nil
         ready = false
-        let connection = xpc_connection_create_mach_service(serviceOverride ?? proto.serviceName, queue, 0)
+        let connection = xpc_connection_create_mach_service(
+            serviceOverride ?? proto.serviceName, queue, 0)
         xpc_connection_set_event_handler(connection) { [weak self] event in self?.handle(event) }
         xpc_connection_resume(connection)
         self.connection = connection
@@ -225,7 +229,8 @@ public final class ClassicXPCSession: @unchecked Sendable {
 
     private func waitReady(timeout: TimeInterval) async throws {
         let token = UUID()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
                 if let failure { return continuation.resume(throwing: failure) }
                 if ready { return continuation.resume() }
@@ -246,7 +251,7 @@ public final class ClassicXPCSession: @unchecked Sendable {
         xpc_dictionary_set_string(args, XPCKey.addressString, address.lowercased())
         let reply = try await request(proto.retrievePeerWithAddress, args, timeout: timeout)
         guard let record = xpc_dictionary_get_value(reply, XPCKey.devices),
-              xpc_get_type(record) == XPC_TYPE_DICTIONARY
+            xpc_get_type(record) == XPC_TYPE_DICTIONARY
         else {
             throw ClassicXPCError.unknownDevice(address)
         }
@@ -256,15 +261,21 @@ public final class ClassicXPCSession: @unchecked Sendable {
         let uuid = NSUUID(uuidBytes: bytes) as UUID
         var services: [(UInt16, UInt8)] = []
         if let list = xpc_dictionary_get_value(record, XPCKey.services),
-           xpc_get_type(list) == XPC_TYPE_ARRAY {
+            xpc_get_type(list) == XPC_TYPE_ARRAY
+        {
             xpc_array_apply(list) { _, service in
                 guard xpc_get_type(service) == XPC_TYPE_DICTIONARY else { return true }
                 var length = 0
-                if let raw = xpc_dictionary_get_data(service, XPCKey.serviceUUID, &length), length == 2 {
+                if let raw = xpc_dictionary_get_data(service, XPCKey.serviceUUID, &length),
+                    length == 2
+                {
                     let bytes = raw.assumingMemoryBound(to: UInt8.self)
                     let rfcomm = xpc_dictionary_get_int64(service, XPCKey.rfcommChannelID)
-                    services.append((UInt16(bytes[0]) << 8 | UInt16(bytes[1]),
-                                     (1...30).contains(rfcomm) ? UInt8(rfcomm) : 0))
+                    services.append(
+                        (
+                            UInt16(bytes[0]) << 8 | UInt16(bytes[1]),
+                            (1...30).contains(rfcomm) ? UInt8(rfcomm) : 0
+                        ))
                 }
                 return true
             }
@@ -344,7 +355,8 @@ public final class ClassicXPCSession: @unchecked Sendable {
             queue.async { [self] in
                 if let failure { return continuation.resume(throwing: failure) }
                 guard openWaiters[psm] == nil else {
-                    return continuation.resume(throwing: ClassicXPCError.refused(ChannelResult.alreadyConnected))
+                    return continuation.resume(
+                        throwing: ClassicXPCError.refused(ChannelResult.alreadyConnected))
                 }
                 openWaiters[psm] = continuation
                 send(proto.openChannel, args)
@@ -359,7 +371,9 @@ public final class ClassicXPCSession: @unchecked Sendable {
 
     /// Opens an RFCOMM channel (e.g. the headphones' hands-free service). The reply carries
     /// a socket like L2CAP; result 913 means macOS already holds the channel.
-    public func openRFCOMM(_ device: UUID, channel: UInt8, timeout: TimeInterval = 5) async throws -> OpenedChannel {
+    public func openRFCOMM(_ device: UUID, channel: UInt8, timeout: TimeInterval = 5) async throws
+        -> OpenedChannel
+    {
         let args = deviceArgs(device)
         xpc_dictionary_set_int64(args, XPCKey.rfcommChannelID, Int64(channel))
         xpc_dictionary_set_value(args, XPCKey.options, xpc_dictionary_create(nil, nil, 0))
@@ -367,7 +381,8 @@ public final class ClassicXPCSession: @unchecked Sendable {
             queue.async { [self] in
                 if let failure { return continuation.resume(throwing: failure) }
                 guard rfcommWaiters[channel] == nil else {
-                    return continuation.resume(throwing: ClassicXPCError.refused(ChannelResult.alreadyConnected))
+                    return continuation.resume(
+                        throwing: ClassicXPCError.refused(ChannelResult.alreadyConnected))
                 }
                 rfcommWaiters[channel] = continuation
                 send(proto.openRFCOMM, args)
@@ -399,7 +414,8 @@ public final class ClassicXPCSession: @unchecked Sendable {
     private func deviceArgs(_ device: UUID) -> xpc_object_t {
         let args = xpc_dictionary_create(nil, nil, 0)
         withUnsafeBytes(of: device.uuid) { raw in
-            xpc_dictionary_set_uuid(args, XPCKey.deviceUUID, raw.bindMemory(to: UInt8.self).baseAddress!)
+            xpc_dictionary_set_uuid(
+                args, XPCKey.deviceUUID, raw.bindMemory(to: UInt8.self).baseAddress!)
         }
         return args
     }
@@ -413,7 +429,9 @@ public final class ClassicXPCSession: @unchecked Sendable {
         xpc_connection_send_message(connection, message)
     }
 
-    private func request(_ id: Int64, _ args: xpc_object_t, timeout: TimeInterval) async throws -> xpc_object_t {
+    private func request(_ id: Int64, _ args: xpc_object_t, timeout: TimeInterval) async throws
+        -> xpc_object_t
+    {
         let message = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_int64(message, XPCKey.messageID, id)
         xpc_dictionary_set_value(message, XPCKey.arguments, args)
@@ -421,7 +439,9 @@ public final class ClassicXPCSession: @unchecked Sendable {
         return try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 if let failure { return continuation.resume(throwing: failure) }
-                guard let connection else { return continuation.resume(throwing: ClassicXPCError.notReady) }
+                guard let connection else {
+                    return continuation.resume(throwing: ClassicXPCError.notReady)
+                }
                 box.continuation = continuation
                 xpc_connection_send_message_with_reply(connection, message, queue) { reply in
                     if xpc_get_type(reply) == XPC_TYPE_ERROR {
@@ -484,17 +504,20 @@ public final class ClassicXPCSession: @unchecked Sendable {
                 return
             }
             if result == 0 && fd >= 0 {
-                waiter.resume(returning: OpenedChannel(
-                    fd: fd,
-                    cid: UInt16(truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.cid)),
-                    outMTU: UInt16(truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.outMTU))
-                ))
+                waiter.resume(
+                    returning: OpenedChannel(
+                        fd: fd,
+                        cid: UInt16(truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.cid)),
+                        outMTU: UInt16(
+                            truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.outMTU))
+                    ))
             } else {
                 waiter.resume(throwing: ClassicXPCError.refused(result))
             }
         case proto.rfcommOpened:
             guard let args else { return }
-            let channel = UInt8(truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.rfcommChannelID))
+            let channel = UInt8(
+                truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.rfcommChannelID))
             let result = Int(xpc_dictionary_get_int64(args, XPCKey.result))
             let fd = result == 0 ? xpc_dictionary_dup_fd(args, XPCKey.socket) : -1
             guard let waiter = rfcommWaiters.removeValue(forKey: channel) else {
@@ -502,10 +525,12 @@ public final class ClassicXPCSession: @unchecked Sendable {
                 return
             }
             if result == 0 && fd >= 0 {
-                waiter.resume(returning: OpenedChannel(
-                    fd: fd, cid: 0,
-                    outMTU: UInt16(truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.mtu))
-                ))
+                waiter.resume(
+                    returning: OpenedChannel(
+                        fd: fd, cid: 0,
+                        outMTU: UInt16(
+                            truncatingIfNeeded: xpc_dictionary_get_int64(args, XPCKey.mtu))
+                    ))
             } else {
                 waiter.resume(throwing: ClassicXPCError.refused(result))
             }

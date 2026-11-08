@@ -67,9 +67,11 @@ public struct BluetoothHeadphone: Sendable, Equatable, Identifiable {
 
         func flush() {
             if let name = currentName, let address = currentAddress, let section {
-                result.append(BluetoothHeadphone(name: name, address: address,
-                                                 isConnected: section == "Connected",
-                                                 kind: currentKind))
+                result.append(
+                    BluetoothHeadphone(
+                        name: name, address: address,
+                        isConnected: section == "Connected",
+                        kind: currentKind))
             }
             currentName = nil
             currentAddress = nil

@@ -35,33 +35,35 @@ let start = Date()
 }
 
 func usage() -> Never {
-    FileHandle.standardError.write(Data("""
-    usage: codecblue version
-           codecblue lookup XX:XX:XX:XX:XX:XX
-           codecblue probe  XX:XX:XX:XX:XX:XX
-           codecblue play   XX:XX:XX:XX:XX:XX [FILE.wav] [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
-                            [--media-priority N] [--media-mtu N|0] [--sndbuf-packets N]
-                            [--no-hfp] [--no-avrcp] [--low-latency] [--keep-link-quality] [--adapt] [--gain X]
-           codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
-                            (plays the CodecBlue virtual device)
-           codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
-           codecblue devices                      (the headphones macOS knows about)
-           codecblue status                       (ask a running stream what it is doing)
-           codecblue quality HQ|SQ|LQ|0-4         (the ceiling, while it plays)
-           codecblue adapt   on|off               (let it choose the level itself)
-           codecblue cushion 40                   (the cushion, in ms — this is the latency)
-           codecblue levels                       (the whole ladder, and what fits here)
-           codecblue compare                      (this link against the Mac's own AAC)
-           codecblue link    XX:XX:XX:XX:XX:XX
-           codecblue tone    FILE.wav [SECONDS] [--sweep]  (a constant sine, or a sweep)
-           codecblue flood   XX:XX:XX:XX:XX:XX [SECONDS] [BYTES] [--keep-link-quality]
-           codecblue pace    XX:XX:XX:XX:XX:XX [SEC] [BYTES] [PKT/S] (diagnostic: paced rate)
-           codecblue handlers device|general  (which handler answers each known message)
-           codecblue agent   install|remove|status [ADDR] [options]
-           codecblue audioprobe ADDR   (sends one known message; needs CODECBLUE_AUDIO_CHANNEL=yes)
-           codecblue release XX:XX:XX:XX:XX:XX
+    FileHandle.standardError.write(
+        Data(
+            """
+            usage: codecblue version
+                   codecblue lookup XX:XX:XX:XX:XX:XX
+                   codecblue probe  XX:XX:XX:XX:XX:XX
+                   codecblue play   XX:XX:XX:XX:XX:XX [FILE.wav] [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
+                                    [--media-priority N] [--media-mtu N|0] [--sndbuf-packets N]
+                                    [--no-hfp] [--no-avrcp] [--low-latency] [--keep-link-quality] [--adapt] [--gain X]
+                   codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
+                                    (plays the CodecBlue virtual device)
+                   codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
+                   codecblue devices                      (the headphones macOS knows about)
+                   codecblue status                       (ask a running stream what it is doing)
+                   codecblue quality HQ|SQ|LQ|0-4         (the ceiling, while it plays)
+                   codecblue adapt   on|off               (let it choose the level itself)
+                   codecblue cushion 40                   (the cushion, in ms — this is the latency)
+                   codecblue levels                       (the whole ladder, and what fits here)
+                   codecblue compare                      (this link against the Mac's own AAC)
+                   codecblue link    XX:XX:XX:XX:XX:XX
+                   codecblue tone    FILE.wav [SECONDS] [--sweep]  (a constant sine, or a sweep)
+                   codecblue flood   XX:XX:XX:XX:XX:XX [SECONDS] [BYTES] [--keep-link-quality]
+                   codecblue pace    XX:XX:XX:XX:XX:XX [SEC] [BYTES] [PKT/S] (diagnostic: paced rate)
+                   codecblue handlers device|general  (which handler answers each known message)
+                   codecblue agent   install|remove|status [ADDR] [options]
+                   codecblue audioprobe ADDR   (sends one known message; needs CODECBLUE_AUDIO_CHANNEL=yes)
+                   codecblue release XX:XX:XX:XX:XX:XX
 
-    """.utf8))
+            """.utf8))
     exit(2)
 }
 
@@ -71,7 +73,9 @@ func lookup(_ address: String) async throws {
     defer { session.invalidate() }
     let record = try await session.lookup(address: address)
     print(record)
-    print("link: \(record.isLinkUp ? "up" : "down"), macOS audio device: \(SystemHeadphoneAudio.hasDevice(address: address) ? "yes" : "no")")
+    print(
+        "link: \(record.isLinkUp ? "up" : "down"), macOS audio device: \(SystemHeadphoneAudio.hasDevice(address: address) ? "yes" : "no")"
+    )
 }
 
 func probe(_ address: String) async throws {
@@ -85,7 +89,8 @@ func probe(_ address: String) async throws {
             var line = "  SEID \(endpoint.seid) \(endpoint.isSink ? "sink" : "source")"
             line += endpoint.mediaType == 0 ? " audio" : " media \(endpoint.mediaType)"
             if endpoint.inUse { line += " (in use)" }
-            if let caps = try? await signaling.command(.getCapabilities, Data([endpoint.seid << 2])) {
+            if let caps = try? await signaling.command(.getCapabilities, Data([endpoint.seid << 2]))
+            {
                 let parsed = AVDTP.parseCapabilities(caps.payload)
                 line += ": " + (parsed.codec?.description ?? "no codec capability")
             } else {
@@ -117,17 +122,22 @@ func link(_ address: String) async throws {
             avdtp.append(Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9)
         }
         let avdtpSorted = avdtp.sorted()
-        log(String(format: "AVDTP round trip: min %.1f ms, median %.1f ms, max %.1f ms",
-                   avdtpSorted[0] * 1000, avdtpSorted[avdtpSorted.count / 2] * 1000,
-                   avdtpSorted[avdtpSorted.count - 1] * 1000))
+        log(
+            String(
+                format: "AVDTP round trip: min %.1f ms, median %.1f ms, max %.1f ms",
+                avdtpSorted[0] * 1000, avdtpSorted[avdtpSorted.count / 2] * 1000,
+                avdtpSorted[avdtpSorted.count - 1] * 1000))
         // One round trip per packet is what the media channel gets: with a link that answers
         // in ~100 ms, a 679-byte packet per round trip is ~54 kbps. That is the ceiling we
         // measure, and it comes from the link's latency, not from the codec or the bandwidth.
         let median = avdtpSorted[avdtpSorted.count / 2]
-        log(String(format: "one packet per round trip would be %.0f kbps (679 bytes / %.0f ms)",
-                   679.0 * 8 / median / 1000, median * 1000))
+        log(
+            String(
+                format: "one packet per round trip would be %.0f kbps (679 bytes / %.0f ms)",
+                679.0 * 8 / median / 1000, median * 1000))
 
-        let channel = try await takeover.openChannel(psm: AVCTPHolder.psm, label: "avrcp", timeout: 3)
+        let channel = try await takeover.openChannel(
+            psm: AVCTPHolder.psm, label: "avrcp", timeout: 3)
         let holder = AVCTPHolder(socket: ChannelSocket(channel: channel, label: "avrcp"))
         log("AVRCP held; measuring the idle link for 3 s")
         var samples: [Double] = []
@@ -143,8 +153,11 @@ func link(_ address: String) async throws {
             return
         }
         let sorted = samples.sorted()
-        log(String(format: "idle round trip: min %.0f ms, median %.0f ms, max %.0f ms (%d samples)",
-                   sorted[0] * 1000, sorted[sorted.count / 2] * 1000, sorted[sorted.count - 1] * 1000, sorted.count))
+        log(
+            String(
+                format: "idle round trip: min %.0f ms, median %.0f ms, max %.0f ms (%d samples)",
+                sorted[0] * 1000, sorted[sorted.count / 2] * 1000, sorted[sorted.count - 1] * 1000,
+                sorted.count))
     } catch {
         log("link failed: \(error)")
         await takeover.handBack()
@@ -175,13 +188,18 @@ func play(_ address: String, _ options: [String]) async throws {
             else { usage() }
             rung = parsed
         case "--queue-ms":
-            guard let value = rest.popFirst(), let ms = Double(value), ms >= 20, ms <= 2000 else { usage() }
+            guard let value = rest.popFirst(), let ms = Double(value), ms >= 20, ms <= 2000 else {
+                usage()
+            }
             queueDuration = ms / 1000
         case "--media-priority":
-            guard let value = rest.popFirst(), let priority = Int64(value), priority >= 0 else { usage() }
+            guard let value = rest.popFirst(), let priority = Int64(value), priority >= 0 else {
+                usage()
+            }
             mediaPriority = priority
         case "--sndbuf-packets":
-            guard let value = rest.popFirst(), let packets = Int(value), (1...16).contains(packets) else { usage() }
+            guard let value = rest.popFirst(), let packets = Int(value), (1...16).contains(packets)
+            else { usage() }
             sendBufferPackets = packets
         case "--low-latency":
             lowLatency = true
@@ -197,7 +215,8 @@ func play(_ address: String, _ options: [String]) async throws {
         case "--no-avrcp":
             holdAVRCP = false
         case "--media-mtu":
-            guard let value = rest.popFirst(), let mtu = Int(value), mtu == 0 || (LDACEncoder.minimumMTU...2000).contains(mtu)
+            guard let value = rest.popFirst(), let mtu = Int(value),
+                mtu == 0 || (LDACEncoder.minimumMTU...2000).contains(mtu)
             else { usage() }
             mediaMTU = mtu == 0 ? nil : mtu
         default:
@@ -211,9 +230,13 @@ func play(_ address: String, _ options: [String]) async throws {
         audio = audio.scaled(by: gain)
         log(String(format: "gain: %.2fx", gain))
     }
-    log(String(format: "%@: %.1f s at %d Hz", file ?? "test tone", audio.duration, audio.sampleRate))
+    log(
+        String(format: "%@: %.1f s at %d Hz", file ?? "test tone", audio.duration, audio.sampleRate)
+    )
     let mtuText = mediaMTU.map { "\($0)" } ?? "link"
-    log("media: MTU \(mtuText), \(sendBufferPackets) packet(s) in the socket, priority \(mediaPriority), queue \(Int(queueDuration * 1000)) ms")
+    log(
+        "media: MTU \(mtuText), \(sendBufferPackets) packet(s) in the socket, priority \(mediaPriority), queue \(Int(queueDuration * 1000)) ms"
+    )
 
     var keeper: AudioStreamKeeper?
     if keepLinkQuality {
@@ -251,7 +274,9 @@ func play(_ address: String, _ options: [String]) async throws {
     do {
         let signaling = try await takeover.grabSignaling()
         if lowLatency, !takeover.requestHighPriority() {
-            log("this macOS release does not expose the ACL-priority request; the link may stay in sniff")
+            log(
+                "this macOS release does not expose the ACL-priority request; the link may stay in sniff"
+            )
         }
         let streamer = A2DPStreamer(takeover: takeover, signaling: signaling, log: log)
         streamer.queueDuration = queueDuration
@@ -301,8 +326,9 @@ func play(_ address: String, _ options: [String]) async throws {
 func handlers(_ table: String) async throws {
     let isGeneral = table == "general"
     let known = isGeneral ? KnownMessage.general : KnownMessage.device
-    let session = ClassicXPCSession(label: "handlers",
-                                    service: isGeneral ? XPCProtocol.generalServiceName : nil)
+    let session = ClassicXPCSession(
+        label: "handlers",
+        service: isGeneral ? XPCProtocol.generalServiceName : nil)
     try await session.start()
     defer { session.invalidate() }
     log("asking about \(known.count) known message(s) on the \(table) service")
@@ -331,18 +357,23 @@ func pace(_ address: String, seconds: Double, packetSize: Int, rate: Double) asy
     await takeover.handBack()
 }
 
-func flood(_ address: String, seconds: Double, packetSize: Int, keepLinkQuality: Bool = false,
-           uidSuffix: String = "tacl") async throws {
+func flood(
+    _ address: String, seconds: Double, packetSize: Int, keepLinkQuality: Bool = false,
+    uidSuffix: String = "tacl"
+) async throws {
     // The link quality mode is a controller setting on the ACL connection, and our takeover
     // keeps that connection: so it is worth turning it on *before* taking the link, while
     // bluetoothd still has the audio device published. Once we own the media channel
     // bluetoothd unpublishes the device and refuses our messages with "No device found".
     var keeper: AudioStreamKeeper?
     if keepLinkQuality, let uuid = CBDeviceUUID.resolve(for: address).best {
-        keeper = AudioStreamKeeper(address: address, deviceUUID: uuid, period: 1,
-                                   uidSuffix: uidSuffix, log: log)
+        keeper = AudioStreamKeeper(
+            address: address, deviceUUID: uuid, period: 1,
+            uidSuffix: uidSuffix, log: log)
         keeper?.start()
-        log("asking bluetoothd for A2DP Link Quality Mode before taking the link (\(uuid), uid -\(uidSuffix))")
+        log(
+            "asking bluetoothd for A2DP Link Quality Mode before taking the link (\(uuid), uid -\(uidSuffix))"
+        )
         try await Task.sleep(for: .seconds(3))
     } else if keepLinkQuality {
         log("cannot find bluetoothd's UUID for this device: link quality mode stays off")
@@ -394,7 +425,9 @@ func playSystem(_ address: String, options: [String]) async throws {
             else { usage() }
             rung = parsed
         case "--queue-ms":
-            guard let value = rest.popFirst(), let ms = Double(value), ms >= 20, ms <= 2000 else { usage() }
+            guard let value = rest.popFirst(), let ms = Double(value), ms >= 20, ms <= 2000 else {
+                usage()
+            }
             queueDuration = ms / 1000
         case "--sndbuf-packets":
             guard let value = rest.popFirst(), let packets = Int(value), packets >= 1, packets <= 64
@@ -405,7 +438,9 @@ func playSystem(_ address: String, options: [String]) async throws {
         case "--adapt": adapt = true
         case "--no-adapt": adapt = false
         case "--drift-ppm":
-            guard let value = rest.popFirst(), let ppm = Double(value), abs(ppm) <= 2000 else { usage() }
+            guard let value = rest.popFirst(), let ppm = Double(value), abs(ppm) <= 2000 else {
+                usage()
+            }
             driftPPM = ppm
         default: usage()
         }
@@ -431,13 +466,16 @@ func playSystem(_ address: String, options: [String]) async throws {
         log("install the driver first: scripts/build-driver.sh --install")
         return
     }
-    log("ring: \(ring.sampleRate) Hz, \(ring.channelCount) channels, \(ring.available) frames waiting")
+    log(
+        "ring: \(ring.sampleRate) Hz, \(ring.channelCount) channels, \(ring.available) frames waiting"
+    )
     // Say it out loud when the device is selected but nothing is writing into it. Otherwise every
     // app plays into silence and nothing explains why — which cost real time once already.
     if ring.available == 0 {
-        log("the ring is empty: if apps are playing and you hear nothing, the device is selected "
-            + "but nothing is feeding it. Check that this process is running "
-            + "(`codecblue agent status`), then play something.")
+        log(
+            "the ring is empty: if apps are playing and you hear nothing, the device is selected "
+                + "but nothing is feeding it. Check that this process is running "
+                + "(`codecblue agent status`), then play something.")
     }
     // The volume's *curve* lives in the headphones now (see §13.44 of the notes); what is applied
     // in this process is the mute, as zeros. `SystemVolume` is still read here because it is the
@@ -451,8 +489,11 @@ func playSystem(_ address: String, options: [String]) async throws {
         // here is the mute (1 or 0). A log that claims an attenuation the code does not perform is
         // how the double-attenuation bug of §13.43 stayed invisible for an evening — the number
         // looked plausible in both the broken and the fixed version.
-        log(String(format: "volume: slider %.0f%% goes to the headphones; here only the mute is applied%@",
-                   volume.reported * 100, volume.isMuted ? " (muted: zeros)" : ""))
+        log(
+            String(
+                format:
+                    "volume: slider %.0f%% goes to the headphones; here only the mute is applied%@",
+                volume.reported * 100, volume.isMuted ? " (muted: zeros)" : ""))
         // And what the headphones were actually told. It must be the slider: anything else is the
         // two-attenuations bug coming back.
         if let pushed = volume.lastPushed {
@@ -473,8 +514,9 @@ func playSystem(_ address: String, options: [String]) async throws {
             // Say it, and say what it costs. Without the link quality mode the link carries ~50
             // kbps instead of ~500, and the listener hears crackle for a reason that is nowhere in
             // the audio path. This used to be a silent skip.
-            log("cannot find bluetoothd's UUID for this device: link quality mode stays off, "
-                + "so the link will carry ~50 kbps instead of ~500")
+            log(
+                "cannot find bluetoothd's UUID for this device: link quality mode stays off, "
+                    + "so the link will carry ~50 kbps instead of ~500")
         }
     }
     defer { keeper?.stop() }
@@ -548,8 +590,9 @@ func playSystem(_ address: String, options: [String]) async throws {
     // rather than silently accepted.
     let mediaKeys = MediaKeyHelper(log: say)
     if mediaKeys == nil {
-        say("media keys: codecblue-keys not found next to this binary, so the headphones' "
-            + "play/pause/next will be refused instead of accepted")
+        say(
+            "media keys: codecblue-keys not found next to this binary, so the headphones' "
+                + "play/pause/next will be refused instead of accepted")
     }
     // A way to steer the stream while it runs. Without it the only way to change the quality is
     // to stop, edit the command line and start again — several seconds of silence, which defeats
@@ -570,8 +613,9 @@ func playSystem(_ address: String, options: [String]) async throws {
             // listener asked for HQ because they want the best this link can do, not because they
             // want 45% of the audio thrown away when it cannot do it.
             streamer.requestedRung = rung
-            let name = LDACEncoder.name(rung: rung,
-                                        sampleRate: streamer.currentSampleRate ?? 48000)
+            let name = LDACEncoder.name(
+                rung: rung,
+                sampleRate: streamer.currentSampleRate ?? 48000)
             return ["ok quality=\(name)", "ceiling=\(name)", "rung=\(rung)"]
         case "levels":
             // What the ladder means on this link. The nominal bitrates are the codec's; the
@@ -586,7 +630,7 @@ func playSystem(_ address: String, options: [String]) async throws {
             // answer "is 40 ms enough on this link?", which is a question only the listener can
             // answer.
             guard let text = command.argument, let milliseconds = Double(text),
-                  (10...500).contains(milliseconds)
+                (10...500).contains(milliseconds)
             else { return ["error=cushion must be 10…500 (milliseconds)"] }
             streamer.requestedCushion = milliseconds / 1000
             return ["ok cushion=\(Int(milliseconds))ms"]
@@ -613,13 +657,15 @@ func playSystem(_ address: String, options: [String]) async throws {
     streamer.status = { [ring, volume] in
         var out: [String: String] = [:]
         out["ring_frames"] = String(ring.available)
-        out["ring_ms"] = String(format: "%.0f", Double(ring.available) / Double(ring.sampleRate) * 1000)
+        out["ring_ms"] = String(
+            format: "%.0f", Double(ring.available) / Double(ring.sampleRate) * 1000)
         // The rung that is playing, by the name Sony gave it where there is one and by its
         // bitrate where there is not: "492" is a real answer and neither HQ nor SQ.
         let rate = streamer.currentSampleRate ?? 48000
-        out["quality"] = streamer.currentRung.map {
-            LDACEncoder.name(rung: $0, sampleRate: rate)
-        } ?? "unknown"
+        out["quality"] =
+            streamer.currentRung.map {
+                LDACEncoder.name(rung: $0, sampleRate: rate)
+            } ?? "unknown"
         out["quality_rung"] = streamer.currentRung.map(String.init) ?? "unknown"
         out["quality_kbps"] = streamer.currentBitrateKbps.map(String.init) ?? "unknown"
         out["sample_rate"] = String(streamer.currentSampleRate ?? 48000)
@@ -647,18 +693,23 @@ func playSystem(_ address: String, options: [String]) async throws {
         // just "every packet in the window", which was 499 on this Mac and says nothing about the
         // link. So it is reported only when there was a stall to end it.
         out["packets_per_drain"] = streamer.currentStalls > 0 ? String(streamer.currentBurst) : "-"
-        out["link_quality"] = LinkQuality.judge(stalls: streamer.currentStalls,
-                                                burst: streamer.currentBurst,
-                                                sentPackets: streamer.currentBurst > 0).rawValue
-        out["latency_ms"] = String(format: "%.0f",
-                                   (streamer.currentCushion + Double(ring.available) / Double(ring.sampleRate)) * 1000)
+        out["link_quality"] =
+            LinkQuality.judge(
+                stalls: streamer.currentStalls,
+                burst: streamer.currentBurst,
+                sentPackets: streamer.currentBurst > 0
+            ).rawValue
+        out["latency_ms"] = String(
+            format: "%.0f",
+            (streamer.currentCushion + Double(ring.available) / Double(ring.sampleRate)) * 1000)
         return out
     }
     if control.start() {
         say("control channel: \(ControlServer.defaultPath) (try `codecblue status`)")
     } else {
-        say("control channel: could not create \(ControlServer.defaultPath); "
-            + "the stream works but cannot be steered")
+        say(
+            "control channel: could not create \(ControlServer.defaultPath); "
+                + "the stream works but cannot be steered")
     }
     defer { control.stop() }
     streamer.onKey = { [volume, say, mediaKeys] key in
@@ -667,8 +718,10 @@ func playSystem(_ address: String, options: [String]) async throws {
             guard let volume else { return false }
             let delta: Float = key == "volume_up" ? 1.0 / 16 : -1.0 / 16
             if let position = volume.step(by: delta) {
-                say(String(format: "headphone volume button: slider %.0f%% -> gain %.1f%%",
-                           position * 100, volume.gain * 100))
+                say(
+                    String(
+                        format: "headphone volume button: slider %.0f%% -> gain %.1f%%",
+                        position * 100, volume.gain * 100))
                 return true
             }
             say("headphone volume button: the device refused the change")
@@ -741,8 +794,10 @@ func playSystem(_ address: String, options: [String]) async throws {
         // acting on that echo is what pinned the slider at 100% — measured 2026-11-08, the log
         // showed `absolute 100%` then `slider 100%` and the slider could not be moved again.
         guard let volume, let position = volume.setFromHeadphones(value) else { return }
-        say(String(format: "headphone volume: slider %.0f%% -> gain %.1f%%",
-                   position * 100, volume.gain * 100))
+        say(
+            String(
+                format: "headphone volume: slider %.0f%% -> gain %.1f%%",
+                position * 100, volume.gain * 100))
         // No push back. `set(position:)` has already updated our copy of the slider, so the
         // refresh that follows sees no change and does not echo the value to the headphones —
         // which is what stopped the earlier version from chasing its own tail.
@@ -890,8 +945,10 @@ func playSystem(_ address: String, options: [String]) async throws {
         // is the same push `onChange` does; doing it here as well costs one frame and removes the
         // window where the headphones are at whatever the last session left them.
         streamer.setHeadphoneVolume(volume.reported)
-        log(String(format: "headphones told to play at %.0f%% (the Mac's slider)",
-                   volume.reported * 100))
+        log(
+            String(
+                format: "headphones told to play at %.0f%% (the Mac's slider)",
+                volume.reported * 100))
     }
     // The device runs at 48 kHz and the headphones may take 44.1: convert rather than refuse.
     let resampler = Resampler(from: ring.sampleRate, to: configuration.sampleRate)
@@ -899,7 +956,8 @@ func playSystem(_ address: String, options: [String]) async throws {
     // grows by exactly what was skipped and the stream falls behind by that much.
     // The conversion factor is captured as a number, not as the resampler: the resampler belongs
     // to the audio thread and is not Sendable.
-    let skipScale = resampler.isIdentity
+    let skipScale =
+        resampler.isIdentity
         ? 1.0
         : Double(ring.sampleRate) / Double(configuration.sampleRate)
     streamer.onSkip = { frames in
@@ -930,8 +988,11 @@ func playSystem(_ address: String, options: [String]) async throws {
             // Report every window, not only the ones with a skip: "0 skips, 9 ms waiting" is the
             // evidence that the clicks are not the ring's fault, and silence proves nothing.
             let gain = volume?.gain ?? 1
-            log(String(format: "ring: %d skip(s) in the last 2 s (%d total), %d frames waiting, gain %.1f%%",
-                       now - lastSkips, now, ring.available, gain * 100))
+            log(
+                String(
+                    format:
+                        "ring: %d skip(s) in the last 2 s (%d total), %d frames waiting, gain %.1f%%",
+                    now - lastSkips, now, ring.available, gain * 100))
             lastSkips = now
         }
     }
@@ -967,9 +1028,12 @@ func playSystem(_ address: String, options: [String]) async throws {
             }
             // `frames` are frames at the *encoder's* rate: convert the count back to the device's
             // rate, read that many, then resample up (or down) to what the encoder wants.
-            let deviceFrames = resampler.isIdentity
+            let deviceFrames =
+                resampler.isIdentity
                 ? frames
-                : Int((Double(frames) * Double(ring.sampleRate) / Double(configuration.sampleRate)).rounded())
+                : Int(
+                    (Double(frames) * Double(ring.sampleRate) / Double(configuration.sampleRate))
+                        .rounded())
             var buffer = [Float](repeating: 0, count: deviceFrames * 2)
             let got = ring.read(into: &buffer, count: deviceFrames)
             guard got > 0 else { return [] }
@@ -987,12 +1051,15 @@ func playSystem(_ address: String, options: [String]) async throws {
 func tone(_ path: String, seconds: Double, sweep: Bool = false) throws {
     // A constant sine, not an arpeggio: see WAVFile.sine. The old file changed note every 0.5 s
     // and jumped phase at each change, so it crackled on its own and made every link look bad.
-    let audio = sweep
+    let audio =
+        sweep
         ? WAVFile.sweep(sampleRate: 48000, seconds: seconds)
         : WAVFile.sine(sampleRate: 48000, seconds: seconds)
     try audio.write(to: URL(fileURLWithPath: path))
-    log(String(format: "wrote %@: %.1f s at %d Hz, %@", path, audio.duration, audio.sampleRate,
-               sweep ? "sweep 100 Hz to 8 kHz" : "constant 440 Hz, no transients"))
+    log(
+        String(
+            format: "wrote %@: %.1f s at %d Hz, %@", path, audio.duration, audio.sampleRate,
+            sweep ? "sweep 100 Hz to 8 kHz" : "constant 440 Hz, no transients"))
 }
 
 /// Diagnostic: the audio channel of bluetoothd (`com.apple.BTAudioHALPlugin.xpc`), which is how
@@ -1015,7 +1082,9 @@ func audioprobe(_ address: String) async throws {
     guard ProcessInfo.processInfo.environment["CODECBLUE_AUDIO_CHANNEL"] == "yes" else {
         log("refusing: every sweep of this channel has crashed bluetoothd (5 for 5 on 2026-11-06).")
         log("set CODECBLUE_AUDIO_CHANNEL=yes only if you accept losing Bluetooth for a few seconds")
-        log("what you probably want is `codecblue play --keep-link-quality`, which is the safe path")
+        log(
+            "what you probably want is `codecblue play --keep-link-quality`, which is the safe path"
+        )
         return
     }
     guard let uuid = CBDeviceUUID.resolve(for: address).best else {
@@ -1052,7 +1121,9 @@ func release(_ address: String) async throws {
         }
         try await Task.sleep(for: .milliseconds(100))
     }
-    log("macOS has not published the headphones' audio yet; if it does not, put them in the case for a few seconds")
+    log(
+        "macOS has not published the headphones' audio yet; if it does not, put them in the case for a few seconds"
+    )
 }
 
 final class StreamerBox: @unchecked Sendable {
@@ -1104,7 +1175,8 @@ do {
     case ("tone", 2...4):
         // `tone FILE [SECONDS] [--sweep]`
         let sweep = arguments.contains("--sweep")
-        let seconds = arguments.count > 2 && !arguments[2].hasPrefix("--")
+        let seconds =
+            arguments.count > 2 && !arguments[2].hasPrefix("--")
             ? Double(arguments[2]) ?? 30 : 30
         try tone(arguments[1], seconds: seconds, sweep: sweep)
     case ("pace", 3...5):
@@ -1117,8 +1189,9 @@ do {
         let size = arguments.count > 3 ? Int(arguments[3]) ?? 679 : 679
         let keep = arguments.count > 4 && arguments[4] == "--keep-link-quality"
         let suffix = arguments.count > 5 ? arguments[5] : "tacl"
-        try await flood(arguments[1], seconds: seconds, packetSize: size, keepLinkQuality: keep,
-                        uidSuffix: suffix)
+        try await flood(
+            arguments[1], seconds: seconds, packetSize: size, keepLinkQuality: keep,
+            uidSuffix: suffix)
     case ("rate", 2):
         // Choose the rate the virtual device runs at. It is stored in the ring's header, and the
         // driver reads it when coreaudiod loads it — so this writes the choice and says what to
@@ -1164,7 +1237,9 @@ do {
             exit(0)
         }
         for device in devices {
-            print("\(device.isConnected ? "connected" : "off      ")  \(device.name)  \(device.address)")
+            print(
+                "\(device.isConnected ? "connected" : "off      ")  \(device.name)  \(device.address)"
+            )
         }
     case ("status", 1):
         // Talk to a running stream. No stream is not an error: it is the normal state.
@@ -1198,8 +1273,9 @@ do {
         let capacity = Double(value("link_kbps") ?? "") ?? 0
         let rate = Int(value("sample_rate") ?? "") ?? 48000
         for level in QualityLevels.describe(capacityKbps: capacity, sampleRate: rate) {
-            print((level.chosen ? "✓ " : "  ") + QualityLevels.label(level, capacityKbps: capacity)
-                  + "  (rung \(level.rung))")
+            print(
+                (level.chosen ? "✓ " : "  ") + QualityLevels.label(level, capacityKbps: capacity)
+                    + "  (rung \(level.rung))")
         }
     case ("compare", 1):
         // The question this answers is "how does this compare with the Mac's own AAC?". It cannot
@@ -1208,9 +1284,11 @@ do {
         // configured and what the link did, once a second, while *it* streams — so that is read,
         // and the comparison is made in the only unit both paths share: kbit/s asked of the link.
         guard let text = BluetoothLog.text(window: "12h"),
-              let session = AACSession.parse(text) else {
-            print("no AAC session in the last 12 hours: play something through the Mac's own "
-                  + "Bluetooth output first, and this will read what macOS asked of the link")
+            let session = AACSession.parse(text)
+        else {
+            print(
+                "no AAC session in the last 12 hours: play something through the Mac's own "
+                    + "Bluetooth output first, and this will read what macOS asked of the link")
             exit(0)
         }
         for line in session.describe() { print(line) }
@@ -1224,9 +1302,11 @@ do {
         print("")
         print(session.comparison(floorKbps: floor))
         if let carried = Double(value("link_kbps") ?? ""), carried > 0 {
-            print(String(format: "this link has carried %.0f kbps: AAC's %.0f fits with room, "
-                         + "LDAC's floor of %d %@", carried, session.kbps, floor,
-                         carried >= Double(floor) ? "fits too" : "does not"))
+            print(
+                String(
+                    format: "this link has carried %.0f kbps: AAC's %.0f fits with room, "
+                        + "LDAC's floor of %d %@", carried, session.kbps, floor,
+                    carried >= Double(floor) ? "fits too" : "does not"))
         }
         print("")
         print("The rest of the difference is not a bitrate:")
@@ -1259,7 +1339,8 @@ do {
         let extra = address == nil ? [] : Array(arguments.dropFirst(3))
         try agent(action, address: address, extra: extra)
     case ("play", 2...): try await play(arguments[1], Array(arguments.dropFirst(2)))
-    case ("system", 2...): try await playSystem(arguments[1], options: Array(arguments.dropFirst(2)))
+    case ("system", 2...):
+        try await playSystem(arguments[1], options: Array(arguments.dropFirst(2)))
     default: usage()
     }
 } catch {
@@ -1294,13 +1375,14 @@ func agent(_ action: String, address: String?, extra: [String]) throws {
         // fail at login with nothing in its log but "no such file". `.build/debug` is the stable
         // symlink SwiftPM maintains, and it is what the `codecblue` launcher execs.
         let invoked = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-        let repo = invoked.deletingLastPathComponent()          // .build/out/Products/Debug
-            .deletingLastPathComponent()                        // .build/out/Products
-            .deletingLastPathComponent()                        // .build/out
-            .deletingLastPathComponent()                        // .build
-            .deletingLastPathComponent()                        // the repository
+        let repo = invoked.deletingLastPathComponent()  // .build/out/Products/Debug
+            .deletingLastPathComponent()  // .build/out/Products
+            .deletingLastPathComponent()  // .build/out
+            .deletingLastPathComponent()  // .build
+            .deletingLastPathComponent()  // the repository
         let stable = repo.appendingPathComponent(".build/debug/codecblue")
-        let executable = FileManager.default.isExecutableFile(atPath: stable.path)
+        let executable =
+            FileManager.default.isExecutableFile(atPath: stable.path)
             ? stable.path
             : invoked.path
         guard executable.hasPrefix("/") else {
@@ -1314,7 +1396,9 @@ func agent(_ action: String, address: String?, extra: [String]) throws {
         log("wrote \(plist.path)")
         log("it runs: \(executable) system \(address) \(extra.joined(separator: " "))")
         log("log: \(LaunchAgent.logPath)")
-        log("to load it now: launchctl unload \(plist.path) 2>/dev/null; launchctl load \(plist.path)")
+        log(
+            "to load it now: launchctl unload \(plist.path) 2>/dev/null; launchctl load \(plist.path)"
+        )
     case "remove":
         if FileManager.default.fileExists(atPath: plist.path) {
             try FileManager.default.removeItem(at: plist)
@@ -1327,8 +1411,9 @@ func agent(_ action: String, address: String?, extra: [String]) throws {
         let installed = FileManager.default.fileExists(atPath: plist.path)
         log("plist: \(installed ? plist.path : "not installed")")
         let running = LaunchAgent.isRingMoving()
-        log("the audio device is \(running ? "being fed" : "NOT being fed") "
-            + "(ring \(running ? "moving" : "idle") at /tmp/codecblue-ring)")
+        log(
+            "the audio device is \(running ? "being fed" : "NOT being fed") "
+                + "(ring \(running ? "moving" : "idle") at /tmp/codecblue-ring)")
         if let text = try? String(contentsOfFile: LaunchAgent.logPath, encoding: .utf8) {
             let tail = text.split(separator: "\n").suffix(5).joined(separator: "\n")
             log("last lines of \(LaunchAgent.logPath):\n\(tail)")
