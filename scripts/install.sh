@@ -83,7 +83,9 @@ rm -rf "$APP_DIR/CodecBlue.app"
 cp -R "$MENU_APP" "$APP_DIR/CodecBlue.app"
 # The bundle's own copy of the helper is the one it will find; keep both in step.
 cp .build/debug/codecblue-keys "$APP_DIR/CodecBlue.app/Contents/MacOS/codecblue-keys"
-codesign --force --sign - "$APP_DIR/CodecBlue.app" 2>/dev/null || true
+# Ad-hoc, with the identifier as the designated requirement: `scripts/sign.sh` explains why that
+# matters — a cdhash requirement would forget the Accessibility permission at the next update.
+sh "$HERE/scripts/sign.sh" "$APP_DIR/CodecBlue.app" com.codecblue.menu 2>/dev/null || true
 echo "   $APP_DIR/codecblue"
 echo "   $APP_DIR/codecblue-keys"
 echo "   $APP_DIR/CodecBlue.app"

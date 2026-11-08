@@ -48,7 +48,8 @@ cp "$SRC/Info.plist" "$BUNDLE/Contents/Info.plist"
 
 # Ad-hoc signature: enough for the local machine. A Developer ID would be needed to ship it,
 # and the audio server checks the signature of what it loads.
-codesign --force --sign - "$BUNDLE" 2>/dev/null || echo "warning: codesign failed, the driver may not load"
+sh "$HERE/scripts/sign.sh" "$BUNDLE" com.codecblue.driver 2>/dev/null \
+    || echo "warning: codesign failed, the driver may not load"
 
 echo "built $BUNDLE"
 plutil -lint "$BUNDLE/Contents/Info.plist"

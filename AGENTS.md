@@ -43,10 +43,26 @@ knows its own release on a machine with no git and `git status` stays clean. The
 that file is `0.0.0-development`, which is what a checkout is — if a build says that, the script
 did not run, not that the tag is missing.
 
-Two things a release needs that this repository does not have yet: a Developer ID certificate
-(`CODECBLUE_SIGN_IDENTITY`) and notarisation. Without them the archive is ad-hoc signed, macOS asks
-the user to confirm the first launch, and the Accessibility permission is forgotten on every
-update because it is tied to the signature.
+A release is signed, notarised and stapled when the credentials are there, and says so out loud
+when they are not. Four secrets, all optional:
+
+| secret | what it is |
+|---|---|
+| `CODECBLUE_SIGN_IDENTITY` | `Developer ID Application: Name (TEAMID)` |
+| `CODECBLUE_SIGN_P12` | the certificate and key, base64 of the `.p12` |
+| `CODECBLUE_SIGN_P12_PASSWORD` | its password |
+| `CODECBLUE_NOTARY_KEY_P8` | App Store Connect API key, the `.p8` file's contents |
+| `CODECBLUE_NOTARY_KEY_ID` | its Key ID |
+| `CODECBLUE_NOTARY_ISSUER` | the issuer UUID (only for Team keys) |
+
+Without them the archive is ad-hoc signed: it runs, but macOS asks the user to confirm the first
+launch and the Accessibility permission is forgotten on every update, because it is tied to the
+signature. Locally, `CODECBLUE_NOTARY_PROFILE` (from `xcrun notarytool store-credentials`) does the
+same job as the three key variables.
+
+Signed is not trusted. Signing proves who built the archive; notarisation is Apple having scanned
+it, and the stapled ticket is what lets Gatekeeper accept it on a Mac that has never seen it. All
+three or the user gets a dialog that says the app may be malicious.
 
 ## Build and test
 

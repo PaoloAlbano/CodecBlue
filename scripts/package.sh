@@ -186,47 +186,47 @@ chmod +x "$STAGE/uninstall.sh"
 
 # --- sign -------------------------------------------------------------------------------------
 #
-# Signing is optional and its absence is announced, not hidden. An unsigned release works, but
-# macOS asks the user to confirm the first launch, and the Accessibility permission is tied to the
-# signature — so every update forgets it and the user has to grant it again.
+# One script does the signing, because the ad-hoc path has a subtlety that is easy to lose:
+# `scripts/sign.sh` explains it, and the short version is that an ad-hoc signature's default
+# designated requirement is the hash of that exact binary, so the Accessibility permission the user
+# granted is forgotten at the next build. With `--requirements '=designated => identifier "..."'`
+# the requirement is the bundle identifier, which does not change, and the grant survives updates.
 #
 # The order matters and is not negotiable: sign inside-out (the helper inside the bundle before the
-# bundle), `--options runtime` because the hardened runtime is what notarisation requires, and
-# `--timestamp` because a signature without a trusted timestamp stops validating when the
-# certificate expires — which is a release that works today and breaks in two years for reasons
-# nobody will connect to the certificate.
-if [ -n "${CODECBLUE_SIGN_IDENTITY:-}" ]; then
-    say "signing with ${CODECBLUE_SIGN_IDENTITY}…"
-    sign() {
-        codesign --force --options runtime --timestamp --sign "$CODECBLUE_SIGN_IDENTITY" "$1" \
-            || die "signing $1 failed"
-    }
-    # Inside out: the helper is reached through the bundle, so it is signed first.
-    sign "$STAGE/CodecBlue.app/Contents/MacOS/codecblue-keys"
-    sign "$STAGE/CodecBlue.app"
-    sign "$STAGE/CodecBlueDriver.driver"
-    sign "$STAGE/codecblue"
-    sign "$STAGE/codecblue-keys"
+# bundle), because a nested signature that changes invalidates the one around it.
+say "signing…"
+sign() { sh scripts/sign.sh "$1" "${2:-}"; }
+sign "$STAGE/CodecBlue.app/Contents/MacOS/codecblue-keys" com.codecblue.menu.keys
+sign "$STAGE/CodecBlue.app"
+sign "$STAGE/CodecBlueDriver.driver"
+sign "$STAGE/codecblue" codecblue
+sign "$STAGE/codecblue-keys" codecblue-keys
 
-    # `verify --deep --strict` is the check Apple's own tooling runs. It is here because a broken
-    # signature is worse than no signature: the user gets "damaged and can't be opened", which
-    # reads as a corrupt download and is unfixable from their side.
-    say "verifying the signatures…"
-    for item in "$STAGE/CodecBlue.app" "$STAGE/CodecBlueDriver.driver" \
-                "$STAGE/codecblue" "$STAGE/codecblue-keys"; do
-        codesign --verify --deep --strict --verbose=1 "$item" 2>&1 | grep -v "^$" || true
-    done
-else
+# `verify --deep --strict` is the check Apple's own tooling runs. It is here because a broken
+# signature is worse than no signature: the user gets "damaged and can't be opened", which reads as
+# a corrupt download and is unfixable from their side.
+say "verifying the signatures…"
+for item in "$STAGE/CodecBlue.app" "$STAGE/CodecBlueDriver.driver" \
+            "$STAGE/codecblue" "$STAGE/codecblue-keys"; do
+    codesign --verify --deep --strict "$item" || die "$item does not verify"
+done
+
+if [ -z "${CODECBLUE_SIGN_IDENTITY:-}" ]; then
+    say ""
     say "note: CODECBLUE_SIGN_IDENTITY is not set, so this archive is ad-hoc signed."
-    say "      It runs, but macOS asks for confirmation on first launch and forgets the"
-    say "      Accessibility permission on every update."
+    say "      It runs, and the Accessibility permission now survives updates (the signature"
+    say "      names the bundle identifier, not the binary's hash). But macOS still refuses it"
+    say "      on a Mac that has never run it until the user right-clicks and chooses Open,"
+    say "      because an ad-hoc signature has no authority chain behind it."
 fi
 
+# --- zip --------------------------------------------------------------------------------------
+#
+# `ditto` and not `zip`: it preserves the extended attributes and the resource forks that a bundle
+# needs, and a `.app` zipped with `zip` arrives broken in ways that look like a corrupt download.
 say "zipping…"
 ZIP="$DIST/CodecBlue-$VERSION.zip"
 rm -f "$ZIP"
-# `ditto` and not `zip`: it preserves the extended attributes and the resource forks that a bundle
-# needs, and a `.app` zipped with `zip` arrives broken in ways that look like a corrupt download.
 ditto -c -k --sequesterRsrc --keepParent "$STAGE" "$ZIP"
 
 # --- notarise ---------------------------------------------------------------------------------

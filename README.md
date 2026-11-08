@@ -101,9 +101,12 @@ unzip it, and run `./install.sh` inside the folder. It asks for your password on
 driver, and nothing else. `./uninstall.sh` undoes it.
 
 The archive has the binaries already built — the CLI, the media key helper, the menu bar app and
-the driver — so nothing has to be compiled and no toolchain is needed. It is ad-hoc signed unless
-a Developer ID is configured, which means macOS asks for confirmation the first time and the
-Accessibility permission is forgotten on every update.
+the driver — so nothing has to be compiled and no toolchain is needed.
+
+It is signed, notarised and stapled when the release was built with a Developer ID, and the release
+notes say so. If they do not, the build is ad-hoc signed: it runs, but macOS asks for confirmation
+the first time and forgets the Accessibility permission on every update, because that permission is
+tied to the signature.
 
 ```sh
 shasum -a 256 -c CodecBlue-<version>.zip.sha256

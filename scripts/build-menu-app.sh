@@ -97,13 +97,8 @@ sed -i '' "s/__VERSION__/$VERSION/; s/__BUILD__/$BUILD/" "$APP/Contents/Info.pli
 # ad-hoc otherwise. Ad-hoc is not shippable: the signature changes with every build, so the
 # Accessibility permission the user granted is forgotten on every update, and Gatekeeper on another
 # Mac refuses the download outright.
-if [ -n "${CODECBLUE_SIGN_IDENTITY:-}" ]; then
-    codesign --force --options runtime --sign "$CODECBLUE_SIGN_IDENTITY" "$APP" \
-        || { echo "error: signing with $CODECBLUE_SIGN_IDENTITY failed" >&2; exit 1; }
-    echo "signed with $CODECBLUE_SIGN_IDENTITY"
-else
-    codesign --force --sign - "$APP" 2>/dev/null || echo "warning: could not sign the bundle"
-fi
+sh scripts/sign.sh "$APP" com.codecblue.menu \
+    || { echo "error: signing the bundle failed" >&2; exit 1; }
 
 echo "built $APP"
 echo "run it with: open $APP"
