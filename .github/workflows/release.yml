@@ -1,0 +1,96 @@
+name: Release
+
+# Pushing a tag is the whole instruction: `git tag -a v1.2.0 -m "..." && git push origin v1.2.0`
+# builds, tests, packages, and publishes an archive with the binaries already in it. Nobody has to
+# have a Mac, a toolchain, or a checkout to install CodecBlue — that is the point of a release.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # Needed to create the release and upload the archive.
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          # `git describe` needs the tags, and the version comes from them. Without this the
+          # checkout is a shallow clone with no tags and every release would call itself
+          # 0.0.0-development — which is exactly the kind of bug that ships once and is noticed
+          # by a user rather than by CI.
+          fetch-depth: 0
+
+      # The same gate as a normal push. A tag is not a reason to skip the tests: it is the one
+      # build that reaches people who will never run them.
+      - name: Format and lint
+        run: make lint
+
+      - name: Build and test
+        run: make test
+
+      - name: Package
+        env:
+          # Optional. With a Developer ID in the repository secrets the archive is properly signed
+          # and notarisation can be added later; without it the archive is ad-hoc signed and the
+          # packaging script says so out loud instead of pretending.
+          CODECBLUE_SIGN_IDENTITY: ${{ secrets.CODECBLUE_SIGN_IDENTITY }}
+        run: sh scripts/package.sh
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          archive=".build/dist/CodecBlue-${version}.zip"
+          checksum="${archive}.sha256"
+          test -f "$archive" || { echo "no archive at $archive" >&2; exit 1; }
+
+          # The notes are the commit subjects since the previous tag, which is the only changelog
+          # that cannot drift from the code. `git describe --tags --abbrev=0 HEAD^` finds the tag
+          # before this one; on the first release there is none and the whole history is the notes.
+          previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            range="${previous}..HEAD"
+            heading="Changes since ${previous}"
+          else
+            range="HEAD"
+            heading="First release"
+          fi
+          {
+            echo "## ${heading}"
+            echo
+            git log --no-merges --pretty='- %s' "$range"
+            echo
+            echo "## Install"
+            echo
+            echo 'Download the `.zip` below, unzip it, and run `./install.sh` inside the folder.'
+            echo "It asks for your password once, for the audio driver, and nothing else."
+            echo
+            echo '```sh'
+            echo "shasum -a 256 -c CodecBlue-${version}.zip.sha256"
+            echo '```'
+            echo
+            echo "Requires an Apple Silicon Mac and macOS 14.2 or later."
+          } > notes.md
+
+          # `--verify-tag` because the tag must already exist: this workflow runs *because* of a
+          # tag, and a release created from a branch would be a release of something else.
+          gh release create "$GITHUB_REF_NAME" \
+            --title "CodecBlue ${version}" \
+            --notes-file notes.md \
+            --verify-tag \
+            "$archive" "$checksum"
+
+      - name: Keep the archive as an artifact too
+        # The release asset can be deleted or the release unpublished; the artifact stays attached
+        # to the run for 90 days, which is what makes a bad release diagnosable after the fact.
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodecBlue-${{ github.ref_name }}
+          path: .build/dist/CodecBlue-*.zip*

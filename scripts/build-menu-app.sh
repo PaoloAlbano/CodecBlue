@@ -66,9 +66,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>__VERSION__</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>__BUILD__</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <!-- No Dock icon and no app menu: this lives in the menu bar. -->
@@ -80,10 +80,30 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# The version goes into the bundle, from the same place the binary gets it. A bundle that claims
+# 0.1 while the binary inside it says 1.2.0 is a bundle whose "About" is a lie, and the Finder shows
+# the bundle's answer.
+VERSION=$(sh scripts/version.sh)
+# `CFBundleVersion` has to be a monotonically increasing integer-ish string, and the commit count
+# is exactly that: it goes up with every commit and never repeats.
+BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
+sed -i '' "s/__VERSION__/$VERSION/; s/__BUILD__/$BUILD/" "$APP/Contents/Info.plist"
+
 # Ad-hoc signature. Without any signature macOS refuses to run a bundle whose executable changed
 # after it was created, and the Accessibility permission is remembered per signature — an ad-hoc
 # one is stable as long as the binary does not change, which is enough for a local build.
-codesign --force --sign - "$APP" 2>/dev/null || echo "warning: could not sign the bundle"
+#
+# A release is signed with a real identity when one is configured (`CODECBLUE_SIGN_IDENTITY`), and
+# ad-hoc otherwise. Ad-hoc is not shippable: the signature changes with every build, so the
+# Accessibility permission the user granted is forgotten on every update, and Gatekeeper on another
+# Mac refuses the download outright.
+if [ -n "${CODECBLUE_SIGN_IDENTITY:-}" ]; then
+    codesign --force --options runtime --sign "$CODECBLUE_SIGN_IDENTITY" "$APP" \
+        || { echo "error: signing with $CODECBLUE_SIGN_IDENTITY failed" >&2; exit 1; }
+    echo "signed with $CODECBLUE_SIGN_IDENTITY"
+else
+    codesign --force --sign - "$APP" 2>/dev/null || echo "warning: could not sign the bundle"
+fi
 
 echo "built $APP"
 echo "run it with: open $APP"

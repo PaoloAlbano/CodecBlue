@@ -1160,7 +1160,9 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 do {
     switch (arguments.first, arguments.count) {
     case ("version", _):
-        print("CodecBlue (development)")
+        // The version is the one baked in at build time (see `Version`), so a bug report can say
+        // which release it came from without the reporter having to know anything about git.
+        print("CodecBlue \(Version.describe)")
         print("libldac \(LDAC.libraryVersion)")
         print("bluetoothd XPC table: \(XPCProtocol.current.name)")
     case (nil, _):

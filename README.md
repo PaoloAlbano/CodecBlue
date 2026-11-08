@@ -67,6 +67,7 @@ Requirements: Xcode Command Line Tools (Swift 6). Full Xcode is not needed.
 git clone --recurse-submodules https://github.com/PaoloAlbano/CodecBlue.git
 cd CodecBlue
 make check                         # format + lint + build + tests (what CI runs)
+make release                       # the same .zip a tag publishes, built locally
 .build/debug/codecblue version
 .build/debug/codecblue lookup AA:BB:CC:DD:EE:FF   # what bluetoothd knows about your headphones
 .build/debug/codecblue probe  AA:BB:CC:DD:EE:FF   # list the codecs they support (takes them for a few seconds)
@@ -92,6 +93,21 @@ Installing only the driver is the mistake this script exists to prevent: the dev
 every app plays into it, and nothing feeds it, so the result is silence with no error anywhere.
 
 `./scripts/install.sh --uninstall` removes all three.
+
+## Installing a release
+
+Download the `.zip` from the [releases page](https://github.com/PaoloAlbano/CodecBlue/releases),
+unzip it, and run `./install.sh` inside the folder. It asks for your password once, for the audio
+driver, and nothing else. `./uninstall.sh` undoes it.
+
+The archive has the binaries already built — the CLI, the media key helper, the menu bar app and
+the driver — so nothing has to be compiled and no toolchain is needed. It is ad-hoc signed unless
+a Developer ID is configured, which means macOS asks for confirmation the first time and the
+Accessibility permission is forgotten on every update.
+
+```sh
+shasum -a 256 -c CodecBlue-<version>.zip.sha256
+```
 
 ## Using it
 

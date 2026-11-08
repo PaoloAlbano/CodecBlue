@@ -18,7 +18,7 @@ APP_DIR := $(HOME)/Applications/CodecBlue
 # `.build/out/Products/Debug` is the directory it points at and which `swift package clean` deletes.
 BIN := .build/debug
 
-.PHONY: all build test selftest format lint check menu driver install uninstall clean distclean help
+.PHONY: all build test selftest format lint check menu driver install uninstall release clean distclean help
 
 all: build
 
@@ -28,6 +28,7 @@ help:
 	@echo "make format     rewrite the Swift sources with swift-format"
 	@echo "make lint       check formatting and compiler warnings without changing anything"
 	@echo "make check      lint, then test — the whole gate, and what CI runs"
+	@echo "make release    build the release archive (.build/dist/CodecBlue-<version>.zip)"
 	@echo "make menu       assemble CodecBlue.app"
 	@echo "make driver     build the virtual output device (no install)"
 	@echo "make install    install driver + programs + menu app (asks for sudo once)"
@@ -114,6 +115,12 @@ lint:
 
 # The gate: what CI runs, and what to run before pushing.
 check: lint test
+
+# The archive a tag produces, built here so that a release can be checked before it is published.
+# Needs a tag: without one the version is 0.0.0-development and the archive says so, which is the
+# honest answer but not something to hand to anyone.
+release:
+	@sh scripts/package.sh
 
 menu:
 	@sh scripts/build-menu-app.sh

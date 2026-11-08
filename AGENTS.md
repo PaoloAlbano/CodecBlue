@@ -24,6 +24,30 @@ The repository directory may still be called `ldac_mac`; the project is CodecBlu
 | `third_party/libldac/` | AOSP libldac submodule, unmodified (Apache-2.0) |
 | `Sources/codecblue-selftest/` | Unit tests, run as an executable (see below) |
 
+## Releasing
+
+A tag is the whole instruction:
+
+```sh
+git tag -a v1.2.0 -m "what changed"
+git push origin v1.2.0
+```
+
+`.github/workflows/release.yml` then runs `make lint` and `make test`, packages with
+`scripts/package.sh`, and publishes a `.zip` with the binaries already inside. `make release` does
+the same packaging locally, so a release can be inspected before it is announced.
+
+The version is not a constant. `scripts/version.sh` reads `git describe` and writes
+`Sources/CodecBlueCore/GeneratedVersion.swift` before the build, then restores it, so the binary
+knows its own release on a machine with no git and `git status` stays clean. The committed value of
+that file is `0.0.0-development`, which is what a checkout is — if a build says that, the script
+did not run, not that the tag is missing.
+
+Two things a release needs that this repository does not have yet: a Developer ID certificate
+(`CODECBLUE_SIGN_IDENTITY`) and notarisation. Without them the archive is ad-hoc signed, macOS asks
+the user to confirm the first launch, and the Accessibility permission is forgotten on every
+update because it is tied to the signature.
+
 ## Build and test
 
 ```sh
