@@ -2908,3 +2908,28 @@ func loginItemRemovalTests() {
             "and does not claim to have stopped the stream")
     }
 }
+
+/// A failure that cannot fix itself must not be retried every five seconds.
+///
+/// Measured 2026-11-09: the headphones connected but offering only SBC/AAC — LDAC disabled in their
+/// own app — produced **three restarts every thirty seconds**. Each restart took the system output
+/// before failing, so the Mac's audio device changed hands twice a minute while nothing could
+/// possibly work. The backoff added for an absent headset did not cover this, because the error is
+/// a different type.
+func permanentFailureTests() {
+    test("a codec the headphones do not offer is not a transient condition") {
+        check(A2DPStreamer.StreamError.noLDAC(["SBC", "AAC"]).isPermanent, "no LDAC is permanent")
+        check(A2DPStreamer.StreamError.unsupportedRate(96000, [48000]).isPermanent, "so is a rate")
+        check(!A2DPStreamer.StreamError.stopped.isPermanent, "a stop is not a failure")
+    }
+
+    test("the wait for a permanent failure starts long and stays long") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("catch let error as A2DPStreamer.StreamError"), "the case is handled")
+        check(body.contains("permanent ? max(backoff, 120) : backoff"), "two minutes at least")
+        check(
+            body.contains("this will not fix itself: check the headphones' own app"),
+            "and it says what to change instead of inviting a retry")
+    }
+}

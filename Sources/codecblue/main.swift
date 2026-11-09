@@ -1347,6 +1347,28 @@ func playSystem(_ address: String, options: [String]) async throws {
             try? await Task.sleep(for: .seconds(backoff))
             backoff = min(backoff * 2, 60)
             continue
+        } catch let error as A2DPStreamer.StreamError {
+            // Every other failure used to fall through and kill the process, and `KeepAlive`
+            // turned that into a retry loop with no ceiling: measured 2026-11-09, the headphones
+            // connected but offering only SBC/AAC produced **three restarts every thirty seconds**
+            // — and each one took the system output before failing, so the Mac's audio device
+            // changed hands twice a minute while nothing could possibly work.
+            //
+            // A codec the headphones do not offer is not a transient condition: it will not fix
+            // itself in five seconds, and it will not fix itself in a minute either. So the wait
+            // starts long and stays long, and the message says what to change instead of inviting
+            // a retry.
+            let permanent = error.isPermanent
+            let wait = permanent ? max(backoff, 120) : backoff
+            log(
+                String(
+                    format: "%@%@; retrying in %.0f s",
+                    error.description,
+                    permanent ? " (this will not fix itself: check the headphones' own app)" : "",
+                    wait))
+            try? await Task.sleep(for: .seconds(wait))
+            backoff = min(backoff * 2, 60)
+            continue
         }
         backoff = 5
         guard interruptedByCall else { break }

@@ -23,6 +23,19 @@ public final class A2DPStreamer: @unchecked Sendable {
         case unsupportedRate(Int, [Int])
         /// Asked to stop before the handshake began. Not a failure: the caller is on its way out.
         case stopped
+        /// Whether waiting could plausibly change the answer.
+        ///
+        /// A missing LDAC endpoint is a setting in the headphones' own app, or a pair that does not
+        /// support it: five seconds or five minutes make no difference. A rate the headphones
+        /// refuse is the same kind of fact. Everything else — a link that fell, a channel that was
+        /// not grabbed — is worth retrying.
+        public var isPermanent: Bool {
+            switch self {
+            case .noLDAC, .unsupportedRate: return true
+            case .stopped: return false
+            }
+        }
+
         public var description: String {
             switch self {
             case .stopped:
