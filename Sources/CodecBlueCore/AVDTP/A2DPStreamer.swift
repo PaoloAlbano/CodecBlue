@@ -21,8 +21,12 @@ public final class A2DPStreamer: @unchecked Sendable {
     public enum StreamError: Error, CustomStringConvertible {
         case noLDAC([String])
         case unsupportedRate(Int, [Int])
+        /// Asked to stop before the handshake began. Not a failure: the caller is on its way out.
+        case stopped
         public var description: String {
             switch self {
+            case .stopped:
+                "stopped before the stream started"
             case .noLDAC(let codecs):
                 "the headphones offer no LDAC endpoint (they offer: \(codecs.joined(separator: ", "))). "
                     + "LDAC has to be enabled in the headphones' own app, and not every pair supports it: "
@@ -221,6 +225,32 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// settle rule can act on it: it only ever fires on a window that dropped audio.
     public private(set) var currentCarriedKbps = 0.0
 
+    /// The fraction of real time the link took to carry the last window, 0…1+.
+    ///
+    /// This is the number that makes the capacity measurable without waiting for a drop. A link
+    /// that spends 99% of real time delivering 330 kbps cannot carry much more than 333, and
+    /// saying so is the difference between a menu that answers "does HQ fit here?" and one that
+    /// answers "990" forever. Measured 2026-11-09: `link_kbps` read 0 on every stream that never
+    /// dropped audio, so the menu could not say what fitted and the listener read "High · up to
+    /// 990 kbps" as a promise.
+    public private(set) var currentOccupancy = 0.0
+
+    /// The meter's accepted-frame count at the last report, so the window's own figure can be
+    /// taken without consuming the meter that `report()` needs.
+    private var meterReportedFrames = 0
+
+    /// The most the link has carried in a window that dropped nothing, in kbit/s.
+    ///
+    /// A *lower bound* on the capacity, not the capacity. The stream is paced to real time, so a
+    /// healthy window always looks like "kept up" whatever spare room the link has: measured
+    /// 2026-11-09, `link took 100% of real time` on a link carrying 336 kbps with no drops, which
+    /// says nothing about whether it could carry 990. Dividing by that fraction — the first
+    /// version of this — would have reported "capacity 336" and been wrong in the other direction.
+    ///
+    /// What it is good for: it is the honest answer to "has this link ever carried 990?". If the
+    /// floor is 336, HQ has never once been carried, and saying so is better than silence.
+    public private(set) var currentFloorKbps = 0.0
+
     /// The headphones' battery, as last reported, or nil if they have not said.
     public private(set) var batteryPercent: Int?
     /// Applied to every frame just before encoding. The system volume lives here rather than in
@@ -278,6 +308,12 @@ public final class A2DPStreamer: @unchecked Sendable {
     ///   A rate they do not support is not an error: the next one they do support is used, and
     ///   the log says so. See `StreamError.unsupportedRate` for the case where they offer none.
     public func setUp(sampleRate: Int?, rung: Int) async throws -> Configuration {
+        // A stop that arrived before the handshake started. `stop()` only sets a flag, so without
+        // this the whole handshake runs — AVRCP, LDAC configuration, media channel, START — and
+        // the stream is announced as started a second before it is torn down. Measured
+        // 2026-11-09: `stream started` and `stopped during the handshake` on the same millisecond,
+        // which reads like a contradiction because it is one.
+        if state.stopped { throw StreamError.stopped }
         // Hold AVRCP before the media channel: some headphones refuse it afterwards (Bathys,
         // per Blue Bloom), and holding it keeps macOS from reconnecting its profiles.
         if holdAVRCP {
@@ -841,6 +877,13 @@ public final class A2DPStreamer: @unchecked Sendable {
                 // read 0 on a link that was taking 60 packets per drain.
                 let burst = meter.longestBurst
                 let stallCount = meter.stalls
+                // Read here, before `report()`: it consumes the window's accepted frames, so
+                // asking afterwards returned 0 — the same trap as `carriedKbps` above, and the
+                // reason `link_kbps` stayed 0 on every stream that never dropped audio.
+                let occupancy =
+                    Double(meter.acceptedFrames - meterReportedFrames)
+                    / Double(encoder.sampleRate) / window
+                meterReportedFrames = meter.acceptedFrames
                 // Widen only when the stall *outlasted* the cushion: a 46 ms refusal is
                 // absorbed by an 80 ms cushion and needs no more room. The earlier rule was
                 // "half the cushion", which widened for stalls the cushion already covered —
@@ -898,11 +941,32 @@ public final class A2DPStreamer: @unchecked Sendable {
                 // A level chosen from outside wins, and turns the adapter off: see
                 // `requestedQuality`.
                 currentRung = encoder.rung
-                currentBitrateKbps = encoder.bitrateKbps
+                // Only when audio actually went out this window.
+                //
+                // `ldacBT_get_bitrate` reports the bitrate of the *last frame encoded*, and with
+                // no audio there is no last frame: it keeps returning whatever the encoder was
+                // set up with, which is 990. Measured 2026-11-09 — the menu said "LDAC Low 990
+                // kbps", a sentence that cannot be true, because Low is 330 and 990 is High.
+                // Nothing sent means nothing to report, and the menu already knows how to say
+                // that.
+                // The rung's own number, not `ldacBT_get_bitrate`.
+                //
+                // Reported 2026-11-09, with the menu showing the number beside the level: "HQ
+                // 990 kbps" while the link was carrying 396. `get_bitrate` lags a move by a
+                // frame, and after a move it reports the rung we left — the same stale number
+                // that made the log say "settled on 990" after abandoning 990. The rung is what
+                // is playing; the ladder says what it is worth.
+                currentBitrateKbps =
+                    carriedKbps > 0
+                    ? LDACEncoder.nominalKbps(
+                        rung: encoder.rung, sampleRate: encoder.sampleRate)
+                    : nil
                 currentSampleRate = encoder.sampleRate
                 currentCushion = queue.maxDuration
                 currentBurst = burst
                 currentStalls = stallCount
+                currentOccupancy = occupancy
+                if carriedKbps > 0 { currentFloorKbps = max(currentFloorKbps, carriedKbps) }
                 // Only a window that *lost audio* measures the ceiling; see `currentCarriedKbps`.
                 //
                 // A refusal the queue absorbed is not evidence about the link: the cushion exists
@@ -969,11 +1033,18 @@ public final class A2DPStreamer: @unchecked Sendable {
                         // The queue holds packets encoded at the old rung, and they are both
                         // stale and the wrong shape: see the note in the request block above.
                         queue.removeAll()
+                        // The rung's own bitrate, not `encoder.bitrateKbps`: that reads the last
+                        // frame encoded, which is still the rung we just abandoned. See
+                        // `LDACEncoder.nominalKbps`.
+                        let landed =
+                            LDACEncoder.nominalKbps(
+                                rung: fittedRung, sampleRate: encoder.sampleRate)
+                            ?? encoder.bitrateKbps
                         log(
                             String(
                                 format: "quality: LDAC %@ does not fit this link "
                                     + "(%.0f kbps carried, %.0f%% dropped): settled on %d kbps",
-                                abandoned, carriedKbps, dropped * 100, encoder.bitrateKbps))
+                                abandoned, carriedKbps, dropped * 100, landed))
                     }
                 }
                 if adaptBitrate {
@@ -983,13 +1054,19 @@ public final class A2DPStreamer: @unchecked Sendable {
                         break
                     case .down(let rung):
                         encoder.move(toRung: rung)
+                        let now =
+                            LDACEncoder.nominalKbps(rung: rung, sampleRate: encoder.sampleRate)
+                            ?? encoder.bitrateKbps
                         log(
                             String(
                                 format: "bitrate: down to %d kbps (%.0f%% dropped, queue %.0f%%)",
-                                encoder.bitrateKbps, dropped * 100, fill * 100))
+                                now, dropped * 100, fill * 100))
                     case .up(let rung):
                         encoder.move(toRung: rung)
-                        log("bitrate: up to \(encoder.bitrateKbps) kbps (the link has been clean)")
+                        let now =
+                            LDACEncoder.nominalKbps(rung: rung, sampleRate: encoder.sampleRate)
+                            ?? encoder.bitrateKbps
+                        log("bitrate: up to \(now) kbps (the link has been clean)")
                     }
                 }
                 reportsSoFar += 1
@@ -1030,11 +1107,32 @@ public final class A2DPStreamer: @unchecked Sendable {
     ) {
         let window = max(Double(now - lastReport) / 1e9, 0.001)
         let accepted = meter.takeFraction(sampleRate: encoder.sampleRate, window: window)
+        // The rung's own name and bitrate, not `encoder.quality` / `encoder.bitrateKbps`.
+        //
+        // Measured 2026-11-09, in the first seconds of a stream: `codec LQ 990 kbps`. Both halves
+        // were wrong in the same way — the rung had already moved to LQ while
+        // `ldacBT_get_bitrate` was still reporting the 990 of the last frame, and a rung is not a
+        // `Quality` anyway: two of the five have no name. `nominalKbps` answers from the ladder.
+        let rungName = LDACEncoder.name(rung: encoder.rung, sampleRate: encoder.sampleRate)
+        let rungKbps =
+            LDACEncoder.nominalKbps(
+                rung: encoder.rung, sampleRate: encoder.sampleRate) ?? encoder.bitrateKbps
+        // And when nothing was sent in this window there is no bitrate to report at all: a number
+        // next to "0 kbps out" is a claim about a link nothing has crossed.
+        // An unnamed rung's name is its bitrate, so printing both says it twice: measured
+        // 2026-11-09, `codec 396 396 kbps`.
+        let named = rungName != "\(rungKbps)"
+        let codec =
+            stats.packetsPerSecond(window: window) > 0
+            ? (named
+                ? String(format: "codec %@ %d kbps", rungName, rungKbps)
+                : String(format: "codec %d kbps", rungKbps))
+            : "codec \(rungName), nothing sent yet"
         var line = String(
             format:
-                "streaming: %.0f kbps out, %.0f packets/s, link took %.0f%% of real time (codec %@ %d kbps)",
+                "streaming: %.0f kbps out, %.0f packets/s, link took %.0f%% of real time (%@)",
             stats.sentKbps(window: window), stats.packetsPerSecond(window: window),
-            accepted * 100, encoder.quality.name, encoder.bitrateKbps
+            accepted * 100, codec
         )
         line += String(format: ", queue %.0f ms", queue.queuedDuration * 1000)
         if stats.droppedFrames > 0 {

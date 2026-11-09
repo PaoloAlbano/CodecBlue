@@ -29,6 +29,85 @@ import Foundation
 
 let start = Date()
 
+/// Stops the stream when this process is asked to stop, politely, whichever way it is asked.
+///
+/// Two signals mean the same thing and arrive from different places:
+///
+///   SIGINT   Ctrl-C in a terminal.
+///   SIGTERM  `launchctl unload`, a logout, a reboot, `kill`. This is the one that matters and the
+///            one that was missing: the agent is owned by launchd, so *every* ordinary way of
+///            stopping it — the menu's Stop, a reboot, `launchctl unload` — arrives as SIGTERM.
+///            Unhandled, the process dies where it stands and the headphones stay taken: macOS
+///            never gets them back, and the only cure is putting them in the case for a few
+///            seconds. Measured 2026-11-09: a stream stopped from the menu left the FreeBuds
+///            unreachable until they were re-cradled.
+///
+/// The handler only *asks* the stream to stop. The teardown that hands the headphones back is the
+/// normal path at the end of `play`/`playSystem`, which is already written and already tested —
+/// doing the hand-back inside a signal handler would mean doing async work in a context where the
+/// runtime is going away underneath it.
+///
+/// A second signal is ignored rather than acted on: the first one started a teardown that takes a
+/// few seconds (the link has to drop and macOS has to reconnect), and a user pressing Ctrl-C twice
+/// means "hurry up", not "abandon the hand-back".
+final class StopRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked = false
+    private var handler: (@Sendable () -> Void)?
+    private var sources: [DispatchSourceSignal] = []
+
+    /// Starts listening on both signals, once for the life of the process.
+    ///
+    /// Separated from `route` because a process can outlive a stream: `system` hands the
+    /// headphones back for the duration of a phone call and starts again afterwards, and a Ctrl-C
+    /// pressed during that gap used to be swallowed — the session's `StopRequest` was the only
+    /// listener and it had just been deallocated. Measured 2026-11-09: `kill -INT` during a call
+    /// did nothing at all and the process kept streaming after it.
+    func listen() {
+        for signalNumber in [SIGINT, SIGTERM] {
+            signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
+            source.setEventHandler { [weak self] in self?.request(reason: signalNumber) }
+            source.resume()
+            // Held, or the source is deallocated and the signal goes back to killing the process.
+            sources.append(source)
+        }
+    }
+
+    /// Sends the next stop to this closure. Replaces any previous one: there is one stream at a
+    /// time, and the newest one is the one worth stopping.
+    ///
+    /// If a stop was already asked for, the closure is called at once. Without this the request
+    /// fell into the gap between the signal and the session that was about to start: `request`
+    /// had already run, so it reported "already stopping" and never called the *new* handler, and
+    /// the session started anyway. Measured 2026-11-09, twice.
+    func route(to onStop: @escaping @Sendable () -> Void) {
+        let alreadyAsked = lock.withLock { () -> Bool in
+            handler = onStop
+            return asked
+        }
+        if alreadyAsked { onStop() }
+    }
+
+    /// Whether a stop has already been asked for. A session that starts after the user pressed
+    /// Ctrl-C must not start at all.
+    var wasAsked: Bool { lock.withLock { asked } }
+
+    private func request(reason: Int32) {
+        lock.lock()
+        let alreadyAsked = asked
+        asked = true
+        let handler = self.handler
+        lock.unlock()
+        guard !alreadyAsked else {
+            log("already stopping: the headphones are being handed back, this takes a few seconds")
+            return
+        }
+        log(reason == SIGTERM ? "asked to stop (SIGTERM): stopping" : "interrupted: stopping")
+        handler?()
+    }
+}
+
 @Sendable func log(_ message: String) {
     let t = Date().timeIntervalSince(start)
     FileHandle.standardError.write(Data(String(format: "[%7.3f] %@\n", t, message).utf8))
@@ -61,6 +140,9 @@ func usage() -> Never {
                    codecblue handlers device|general  (which handler answers each known message)
                    codecblue agent   install|remove|status [ADDR] [options]
                    codecblue audioprobe ADDR   (sends one known message; needs CODECBLUE_AUDIO_CHANNEL=yes)
+                   codecblue start  [ADDR] [options]      (stream now, and at login — no menu bar)
+                   codecblue login  on|off|status         (whether the stream starts at login)
+                   codecblue stop                         (stop the stream and the agent)
                    codecblue release XX:XX:XX:XX:XX:XX
 
             """.utf8))
@@ -261,15 +343,16 @@ func play(_ address: String, _ options: [String]) async throws {
     let takeover = HeadsetTakeover(address: address, log: log)
     takeover.lowLatency = lowLatency
     let streamerBox = StreamerBox()
-    // Ctrl-C: stop streaming; the normal path below then hands the headphones back.
-    signal(SIGINT, SIG_IGN)
-    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-    interrupt.setEventHandler {
-        log("interrupted: stopping")
+    // Ctrl-C, or SIGTERM from launchd: stop streaming; the normal path below then hands the
+    // headphones back.
+    // Held for the life of the function: it owns the signal sources, and a source that is
+    // deallocated takes the handler with it.
+    let stopRequest = StopRequest()
+    stopRequest.listen()
+    stopRequest.route {
         streamerBox.streamer?.stop()
         streamerBox.interrupted = true
     }
-    interrupt.resume()
 
     do {
         let signaling = try await takeover.grabSignaling()
@@ -394,7 +477,57 @@ func flood(
 /// Plays what the virtual device receives: reads the shared ring the driver fills and streams it
 /// to the headphones. This is the whole point of the driver — any app that selects "CodecBlue"
 /// as its output ends up here.
-func playSystem(_ address: String, options: [String]) async throws {
+/// One streaming session: take the headphones, play until something stops it, hand them back.
+///
+/// Returns true when the reason it stopped was a phone call — the caller then waits for the call
+/// to finish and starts another session. Everything else (Ctrl-C, `codecblue stop`, a dead link)
+/// ends the process.
+func playSystemOnce(
+    _ address: String, options: [String], monitor: CallMonitor?, stopRequest: StopRequest
+) async throws -> Bool {
+    // Be the system output for the duration of the session, and give it back afterwards.
+    //
+    // Around the session rather than inside it, so that the restore happens on every way out —
+    // including the early returns — without repeating it at each one. And per session rather than
+    // per process: during a call the headphones are macOS's, so macOS should have the output too.
+    // Tell the driver that someone can feed it, so it stops hiding the device — *before* asking to
+    // be the output, because a hidden device is not eligible as the default and the driver only
+    // notices the flag on its own half-second poll. Order is the whole fix here; measured
+    // 2026-11-09, the other order set the output on a device the system was about to hide.
+    //
+    // Best effort: without the ring there is no stream anyway, and `playSystemSession` says so.
+    let ringForFeeding = try? SharedRing()
+    ringForFeeding?.feeding = true
+    defer { ringForFeeding?.feeding = false }
+    let previousOutput = DefaultOutput.takeOver()
+    if let previousOutput {
+        log("system output: CodecBlue (was \(previousOutput.name))")
+    } else {
+        log(
+            "system output: not changed — either CodecBlue is not installed or it already was the "
+                + "output. If apps play and you hear nothing, select CodecBlue as the output.")
+    }
+    let interruptedByCall = try await playSystemSession(
+        address, options: options, monitor: monitor, stopRequest: stopRequest)
+    switch await DefaultOutput.giveBack(previousOutput) {
+    case .restored(let name):
+        DefaultOutput.forget()
+        log("system output: back to \(name)")
+    case .leftAlone(let name):
+        DefaultOutput.forget()
+        log("system output: left on \(name) — you chose it")
+    case .gone(let name):
+        log("system output: \(name) did not come back; leaving CodecBlue selected")
+    case .nothingToDo:
+        DefaultOutput.forget()
+    }
+    return interruptedByCall
+}
+
+/// One streaming session, without touching the system output: see `playSystemOnce`.
+func playSystemSession(
+    _ address: String, options: [String], monitor: CallMonitor?, stopRequest: StopRequest
+) async throws -> Bool {
     var rung = 4
     var keepLinkQuality = true
     var adapt = true
@@ -417,6 +550,9 @@ func playSystem(_ address: String, options: [String]) async throws {
     // measured reason. The option stays for the case where the ring is proven healthy and the
     // delay still grows.
     var driftPPM = 0.0
+    // How the headphones go back to macOS when the stream ends.
+    var handBackStyle: HeadsetTakeover.HandBackStyle = .reconnect
+    var handBackWait = 3.0
     var rest = options[...]
     while let option = rest.popFirst() {
         switch option {
@@ -442,6 +578,20 @@ func playSystem(_ address: String, options: [String]) async throws {
                 usage()
             }
             driftPPM = ppm
+        case "--hand-back":
+            guard let value = rest.popFirst(),
+                let parsed = HeadsetTakeover.HandBackStyle.named(value)
+            else { usage() }
+            handBackStyle = parsed
+        case "--hand-back-wait":
+            guard let value = rest.popFirst(), let seconds = Double(value), seconds > 0,
+                seconds <= 30
+            else { usage() }
+            handBackWait = seconds
+        case "--no-call-monitor":
+            // Handled by the caller, which decides whether to create the monitor at all. Accepted
+            // here so that the option is not a usage error when the session is started directly.
+            break
         default: usage()
         }
     }
@@ -464,7 +614,7 @@ func playSystem(_ address: String, options: [String]) async throws {
     } catch {
         log("\(error)")
         log("install the driver first: scripts/build-driver.sh --install")
-        return
+        return false
     }
     log(
         "ring: \(ring.sampleRate) Hz, \(ring.channelCount) channels, \(ring.available) frames waiting"
@@ -477,6 +627,12 @@ func playSystem(_ address: String, options: [String]) async throws {
                 + "but nothing is feeding it. Check that this process is running "
                 + "(`codecblue agent status`), then play something.")
     }
+    // Be the system output, and remember what was there.
+    //
+    // The device is published by a HAL plug-in, so it is in the list whether or not anything feeds
+    // it — and choosing it used to be a manual step (`scripts/setoutput.swift CodecBlue`) whose
+    // failure mode is silence. Starting the stream is the moment the listener has said "use these
+    // headphones", so it is the moment to become the output.
     // The volume's *curve* lives in the headphones now (see §13.44 of the notes); what is applied
     // in this process is the mute, as zeros. `SystemVolume` is still read here because it is the
     // only place that knows the slider position and whether the device is muted.
@@ -522,15 +678,26 @@ func playSystem(_ address: String, options: [String]) async throws {
     defer { keeper?.stop() }
 
     let takeover = HeadsetTakeover(address: address, log: log)
+    takeover.inPlaceWait = handBackWait
     let box = StreamerBox()
-    signal(SIGINT, SIG_IGN)
-    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-    interrupt.setEventHandler {
-        log("interrupted: stopping")
+    stopRequest.route {
         box.streamer?.stop()
         box.interrupted = true
     }
-    interrupt.resume()
+    // A stop asked *before* this session existed still applies.
+    //
+    // Measured 2026-11-09: Ctrl-C during the gap of a phone call was routed to the session that
+    // had just ended, and the next session started anyway — the process then streamed for another
+    // six seconds after being told to stop, which is the worst possible moment to ignore it. The
+    // signal and the session start are two threads; the check has to be on this side of the race.
+    if stopRequest.wasAsked { box.interrupted = true }
+    // A call takes the stream down the same way Ctrl-C does, but the process stays alive: the
+    // headphones go back to macOS for the duration and are taken again afterwards.
+    monitor?.onChange = { active in
+        guard active else { return }
+        box.callInterrupted = true
+        box.streamer?.stop()
+    }
 
     // The keeper needs the UUID, and the UUID is only in bluetoothd's log — which is written when
     // the headphones connect. `play` (and the agent) start with the headphones *off*, ask macOS to
@@ -688,7 +855,23 @@ func playSystem(_ address: String, options: [String]) async throws {
         out["link_stalls"] = String(streamer.currentStalls)
         // What the link carries, which is what decides whether a level is usable at all: HQ asks
         // 990 and this machine carries ~530, so HQ here means "half the audio thrown away".
-        out["link_kbps"] = String(format: "%.0f", streamer.currentCarriedKbps)
+        // What the link has *demonstrably* carried, and whether that was ever the level asked for.
+        //
+        // `link_kbps` used to be `currentCarriedKbps`, which is 0 until audio is thrown away — so
+        // on every healthy stream the menu had nothing to compare against and showed "High · up to
+        // 990 kbps" with no contradiction. Reported 2026-11-09 as "why do I still see high at 990
+        // kbps?".
+        //
+        // It is a floor, not a capacity, and the menu says so: `link_floor` is what has been
+        // carried, `link_ceiling` is what a window that dropped audio measured. When the ceiling
+        // is known it wins, because it is the only one of the two that is an actual limit.
+        out["link_kbps"] = String(
+            format: "%.0f",
+            streamer.currentCarriedKbps > 0
+                ? streamer.currentCarriedKbps : streamer.currentFloorKbps)
+        out["link_ceiling"] = String(format: "%.0f", streamer.currentCarriedKbps)
+        out["link_floor"] = String(format: "%.0f", streamer.currentFloorKbps)
+        out["link_occupancy"] = String(format: "%.0f", streamer.currentOccupancy * 100)
         // The burst only means something when the socket refused something: with no refusal it is
         // just "every packet in the window", which was 499 on this Mac and says nothing about the
         // link. So it is reported only when there was a stall to end it.
@@ -931,12 +1114,33 @@ func playSystem(_ address: String, options: [String]) async throws {
         return volume.isMuted ? 0 : 1
     }
     box.streamer = streamer
+    // A stop asked for before this streamer existed could not reach it: `route` had no streamer to
+    // stop, so it only set the flag. Carry the flag across, or the handshake runs to completion
+    // and announces a stream that is about to be torn down.
+    if box.interrupted { streamer.stop() }
     // nil = take whatever the headphones offer; the device's own rate is only a preference.
     // Ask for the device's own rate. It is what the audio already is, so asking for it means no
     // resampling at all; asking for 48 when the device runs at 44.1 would convert every sample
     // for no reason. `setUp` treats it as a preference, so a device that cannot take this rate
     // still gets the best it offers.
-    let configuration = try await streamer.setUp(sampleRate: ring.sampleRate, rung: rung)
+    let configuration: A2DPStreamer.Configuration
+    do {
+        configuration = try await streamer.setUp(sampleRate: ring.sampleRate, rung: rung)
+    } catch A2DPStreamer.StreamError.stopped {
+        // Asked to stop before the handshake began: not a failure, just an early exit.
+        log("stopped before the stream started: not taking the headphones")
+        await takeover.handBack(handBackStyle)
+        return false
+    }
+    // A stop that arrived during the handshake: everything below assumes a live stream. Check
+    // here, once, rather than in each of the places that would otherwise have to know.
+    if box.interrupted {
+        log("stopped during the handshake: not starting the stream")
+        await streamer.tearDown()
+        log("handing the headphones back to macOS")
+        await takeover.handBack(handBackStyle)
+        return false
+    }
     // Now the AVRCP channel exists, so the headphones can be told the volume the Mac is at.
     // Without this the two volumes are independent: the slider moves our gain and the headphones
     // keep their own attenuation, which is exactly what was reported.
@@ -973,6 +1177,15 @@ func playSystem(_ address: String, options: [String]) async throws {
         keeper?.askAgainNow(because: "once the stream started")
     }
 
+    if box.interrupted {
+        // The handshake took seconds and a stop arrived in the middle of it: tear down now rather
+        // than start streaming into a process that is on its way out.
+        log("stopped during the handshake: not starting the stream")
+        await streamer.tearDown()
+        log("handing the headphones back to macOS")
+        await takeover.handBack(handBackStyle)
+        return false
+    }
     if !resampler.isIdentity {
         log("resampling \(ring.sampleRate) Hz -> \(configuration.sampleRate) Hz for the encoder")
     }
@@ -984,6 +1197,23 @@ func playSystem(_ address: String, options: [String]) async throws {
         var lastSkips = 0
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(2))
+            // Re-assert the claim, every window.
+            //
+            // The field holds one pid and this process is not the only one that wants to feed:
+            // `codecblue system` run by hand while the agent is streaming takes it, and when that
+            // run ends the field goes to 0 — the agent is still streaming and the driver is told
+            // nobody is. Measured 2026-11-09: the device vanished from the output list, macOS fell
+            // back to the headphones, and `status` said `link_quality unknown` with a battery
+            // percentage, which reads as healthy. `feeding` refuses to steal a live claim, so a
+            // stream that has lost the field says so and takes it back.
+            if !ring.feeding {
+                ring.feeding = true
+                if !ring.feeding {
+                    log(
+                        "ring: another process is feeding this ring; the device will hide "
+                            + "and the system output will fall back")
+                }
+            }
             let now = ring.skips
             // Report every window, not only the ones with a skip: "0 skips, 9 ms waiting" is the
             // evidence that the clicks are not the ring's fault, and silence proves nothing.
@@ -1042,7 +1272,39 @@ func playSystem(_ address: String, options: [String]) async throws {
     }.value
     await streamer.tearDown()
     log("handing the headphones back to macOS")
-    await takeover.handBack()
+    await takeover.handBack(handBackStyle)
+    return box.callInterrupted
+}
+
+/// The system output, played for as long as the user wants it — across calls.
+///
+/// A call is not the end of the session, it is an interruption of it: the headphones belong to
+/// macOS while someone is talking into them, and they come back when the call is over. That is
+/// the whole reason this wrapper exists rather than a single pass.
+func playSystem(_ address: String, options: [String]) async throws {
+    let stopRequest = StopRequest()
+    stopRequest.listen()
+    let monitorWanted = !options.contains("--no-call-monitor")
+    var monitor: CallMonitor?
+    if monitorWanted {
+        monitor = CallMonitor(log: log)
+        monitor?.start()
+    }
+    defer { monitor?.stop() }
+    while true {
+        let interruptedByCall = try await playSystemOnce(
+            address, options: options, monitor: monitor, stopRequest: stopRequest)
+        guard interruptedByCall else { break }
+        // A Ctrl-C during the call's gap stops the process, not just the session: there is nothing
+        // left to come back to.
+        guard !stopRequest.wasAsked else { break }
+        // The headphones are macOS's now: wait for the call to end, then take them back.
+        log("the headphones are macOS's for the call; waiting for it to end")
+        while monitor?.isCallActive == true {
+            try? await Task.sleep(for: .seconds(1))
+        }
+        log("taking the headphones back")
+    }
     exit(0)
 }
 
@@ -1129,6 +1391,8 @@ func release(_ address: String) async throws {
 final class StreamerBox: @unchecked Sendable {
     var streamer: A2DPStreamer?
     var interrupted = false
+    /// Set when a phone call is what stopped the stream, so the caller knows to start again.
+    var callInterrupted = false
 }
 
 /// Carries the "ask for the link quality mode now" action into a `@Sendable` callback.
@@ -1249,10 +1513,26 @@ do {
             print("no stream is running (nothing at \(ControlServer.defaultPath))")
             exit(0)
         }
+        // A value that means "nothing to say yet" is spelled out.
+        //
+        // Reported 2026-11-09: "codecblue on the command line also gives me link quality unknown".
+        // It was right — `unknown` means nothing has been sent in the window, which is the normal
+        // state of a stream nobody is playing into — and it read as a fault, because a bare
+        // `unknown` next to `link_kbps 525` looks like a contradiction rather than an explanation.
+        // The stream cannot know the link's quality without pushing audio through it, and saying so
+        // is cheaper than making the reader work it out.
+        let explanations = [
+            "link_quality":
+                "unknown (nothing sent yet: the link is not exercised until audio flows)",
+            "quality_kbps": "unknown (nothing sent yet)",
+        ]
         for line in lines where line != "end" {
             let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
             if parts.count == 2 {
-                print("\(parts[0].padding(toLength: 14, withPad: " ", startingAt: 0)) \(parts[1])")
+                let shown =
+                    explanations[parts[0]].flatMap { parts[1] == "unknown" ? $0 : nil }
+                    ?? parts[1]
+                print("\(parts[0].padding(toLength: 14, withPad: " ", startingAt: 0)) \(shown)")
             } else {
                 print(line)
             }
@@ -1263,17 +1543,27 @@ do {
             exit(1)
         }
         print(lines.joined(separator: "\n"))
-    case ("levels", 1):
+    case ("levels", 1...):
         // The whole ladder, in kbps and in a verdict. Five rungs, not three: the two in the middle
         // have no name and are exactly what a link that carries ~530 kbps needs. Without a stream
         // there is no measured capacity, and then only the nominal bitrates are printed: a guess
         // here would be worse than an answer that says what it knows.
+        //
+        // An optional capacity argument answers "what would this look like on a 530 kbps link?"
+        // without starting a stream — the question the menu is trying to answer, and the one that
+        // is impossible to check by eye.
         let status = ControlClient.send("status") ?? []
         func value(_ key: String) -> String? {
             status.first { $0.hasPrefix(key + "=") }.map { String($0.dropFirst(key.count + 1)) }
         }
-        let capacity = Double(value("link_kbps") ?? "") ?? 0
+        let given = arguments.count > 1 ? Double(arguments[1]) : nil
+        let capacity = given ?? Double(value("link_kbps") ?? "") ?? 0
         let rate = Int(value("sample_rate") ?? "") ?? 48000
+        if given == nil, capacity <= 0 {
+            print("no stream running: the names only, because a bitrate here would be a claim")
+            print("about a link that does not exist yet.")
+            print("(give a capacity to see the verdict: codecblue levels 530)")
+        }
         for level in QualityLevels.describe(capacityKbps: capacity, sampleRate: rate) {
             print(
                 (level.chosen ? "✓ " : "  ") + QualityLevels.label(level, capacityKbps: capacity)
@@ -1334,6 +1624,76 @@ do {
         print(lines.joined(separator: "\n"))
     case ("handlers", 2):
         try await handlers(arguments[1])
+    case ("stop", 1):
+        // One command that stops the stream *and* the agent that would restart it.
+        //
+        // Both are needed and neither is obvious. `quit` down the control socket stops the stream
+        // and hands the headphones back, but launchd's KeepAlive starts it again five seconds
+        // later — right for a crash, wrong for a deliberate stop. Unloading the agent kills the
+        // process with SIGTERM, which stops it politely (see `StopRequest`).
+        //
+        // The order is unload *first*, and it was the other way round until 2026-11-09, when it
+        // failed in a way that looked like success: `stop` printed "agent: unloaded (it will not
+        // restart until it is loaded again)" and `launchctl list` still had `com.codecblue.system`
+        // with a fresh pid. The quit emptied the socket, KeepAlive restarted the agent at the same
+        // second the unload ran, and the restart won the race. The stream was still running, the
+        // headphones were still taken, and the only evidence was a pid that changed.
+        //
+        // Unloading first removes the thing that would restart it, so there is no race to lose.
+        let socket = ControlServer.defaultPath
+        let plist = LaunchAgent.plistURL
+        let installed = FileManager.default.fileExists(atPath: plist.path)
+        if installed {
+            try? LaunchAgent.unload()
+        }
+        // Then ask politely, in case the process survived the unload (it can, for the length of a
+        // teardown: SIGTERM is handled, not obeyed instantly).
+        if FileManager.default.fileExists(atPath: socket) {
+            if let reply = ControlClient.send("quit") {
+                log("stream: \(reply.first ?? "ok")")
+            } else {
+                log("stream: the socket is there but nothing answered")
+            }
+        } else {
+            log("stream: nothing running")
+        }
+        // Wait for the result instead of guessing how long a teardown takes: the headphones are
+        // back when macOS lists their audio device again and CodecBlue is no longer the output.
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            let stillLoaded = installed && LaunchAgent.isLoaded()
+            let ours = SystemVolume.findDevice(named: "CodecBlue") != nil
+            let output = DefaultOutput.current()
+            let outputIsOurs = output.map { $0.name == "CodecBlue" } ?? false
+            if !stillLoaded && !ours && !outputIsOurs { break }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        if installed && LaunchAgent.isLoaded() {
+            log(
+                "agent: still loaded — launchctl refused the unload; try `launchctl bootout gui/$(id -u) \(plist.path)`"
+            )
+        } else if installed {
+            log("agent: unloaded (it will not restart until it is loaded again)")
+            log("to start it again: codecblue start")
+        } else {
+            log("agent: not installed")
+        }
+        // After a crash the record on disk is the only thing that knows what the output was
+        // before. `stop` is where a person looks when the Mac has gone silent, so it gives it back.
+        switch DefaultOutput.recoverIfOrphaned() {
+        case .restored(let name):
+            log("system output: back to \(name) (it had been left on CodecBlue)")
+        case .gone(let name): log("system output: \(name) is not here; leaving CodecBlue selected")
+        case .leftAlone, .nothingToDo: break
+        }
+        if let output = DefaultOutput.current() {
+            log("system output: \(output.name)")
+        }
+        if SystemVolume.findDevice(named: "CodecBlue") != nil {
+            log(
+                "the CodecBlue device is still listed; if no stream is running, the driver hides it "
+                    + "within half a second — if it stays, the headphones may still be taken")
+        }
     case ("agent", 2...):
         // `agent install <address> [options]`, `agent remove`, `agent status`
         let action = arguments[1]
@@ -1343,11 +1703,118 @@ do {
     case ("play", 2...): try await play(arguments[1], Array(arguments.dropFirst(2)))
     case ("system", 2...):
         try await playSystem(arguments[1], options: Array(arguments.dropFirst(2)))
+    case ("start", 1...):
+        try await start(Array(arguments.dropFirst(1)))
+    case ("login", 2):
+        try login(arguments[1])
     default: usage()
     }
 } catch {
     FileHandle.standardError.write(Data("error: \(error)\n".utf8))
     exit(1)
+}
+
+/// Starts the stream the way the menu bar app does, without the menu bar app.
+///
+/// The icon is a remote control, not a requirement: everything it does is one of three things —
+/// write a LaunchAgent, load it, or send a line down a socket — and all three are available here.
+/// This exists because "I would rather not install a toolbar" is a reasonable position, and until
+/// now the answer was a four-step ritual: find the address with `devices`, write a plist with
+/// `agent install`, load it with `launchctl`, then remember `stop` unloads it again.
+///
+/// The address is optional when there is exactly one pair of headphones connected, which is the
+/// common case and the one where typing a MAC address adds nothing.
+func start(_ arguments: [String]) async throws {
+    var address: String?
+    var options: [String] = []
+    var rest = arguments[...]
+    while let argument = rest.popFirst() {
+        if argument.hasPrefix("--") {
+            options.append(argument)
+            // Options that take a value: the value is not an address and must not be read as one.
+            if ["--quality", "--queue-ms", "--media-mtu", "--media-priority", "--sndbuf-packets"]
+                .contains(argument), let value = rest.popFirst()
+            {
+                options.append(value)
+            }
+        } else if address == nil {
+            address = argument
+        } else {
+            options.append(argument)
+        }
+    }
+
+    let chosen: String
+    if let address {
+        chosen = address
+    } else {
+        let connected = BluetoothHeadphone.audioDevices().filter(\.isConnected)
+        switch connected.count {
+        case 1:
+            chosen = connected[0].address
+            log("using \(connected[0].name) (\(chosen))")
+        case 0:
+            log("no headphones are connected. Turn them on, or name one: codecblue start <address>")
+            log(
+                "(paired: \(BluetoothHeadphone.audioDevices().map(\.name).joined(separator: ", ")))"
+            )
+            exit(1)
+        default:
+            // More than one: guessing would take the wrong pair, and taking headphones away from
+            // macOS is not something to do by accident.
+            log("more than one pair is connected; say which:")
+            for device in connected {
+                log("  codecblue start \(device.address)   (\(device.name))")
+            }
+            exit(1)
+        }
+    }
+
+    // The same two steps the menu does, in the same order: write the plist, then load it.
+    try LaunchAgent.install(address: chosen, arguments: options)
+    try LaunchAgent.load()
+    log("streaming to \(chosen)\(options.isEmpty ? "" : " " + options.joined(separator: " "))")
+    log("it also starts at login from now on: launchd loads \(LaunchAgent.plistURL.path)")
+    log("log: \(LaunchAgent.logPath)")
+    log("to stop it and give the headphones back: codecblue stop")
+}
+
+/// Whether the stream starts at login, without the menu bar app.
+///
+/// `on` is the same thing `start` does — a plist in `~/Library/LaunchAgents` is loaded by launchd
+/// at every login — so it exists mainly to turn it *off* without stopping the stream now, and to
+/// answer the question. Removing the plist is what stops it coming back; unloading alone does not,
+/// because launchd reads the file again at the next login.
+func login(_ action: String) throws {
+    let plist = LaunchAgent.plistURL
+    switch action {
+    case "on":
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            log(
+                "nothing to start at login yet: run `codecblue start` first, which writes \(plist.path)"
+            )
+            exit(1)
+        }
+        try LaunchAgent.load()
+        log("the stream starts at login (from \(plist.path))")
+    case "off":
+        try? LaunchAgent.unload()
+        if FileManager.default.fileExists(atPath: plist.path) {
+            try FileManager.default.removeItem(at: plist)
+            log("removed \(plist.path): the stream will not start at login any more")
+        } else {
+            log("it was not going to start at login (no \(plist.path))")
+        }
+        log("the stream itself is still running; `codecblue stop` stops it now")
+    case "status":
+        let installed = FileManager.default.fileExists(atPath: plist.path)
+        log("starts at login: \(installed ? "yes" : "no")")
+        log("plist: \(installed ? plist.path : "not installed")")
+        log("loaded now: \(LaunchAgent.isLoaded() ? "yes" : "no")")
+    default:
+        log("usage: codecblue login on|off|status")
+        exit(2)
+    }
 }
 
 /// Installs, removes or inspects the LaunchAgent that keeps `codecblue system` running.
@@ -1402,13 +1869,26 @@ func agent(_ action: String, address: String?, extra: [String]) throws {
             "to load it now: launchctl unload \(plist.path) 2>/dev/null; launchctl load \(plist.path)"
         )
     case "remove":
+        // Unload before deleting, and say what actually happened.
+        //
+        // Deleting the plist alone leaves the agent loaded and running: launchd already read the
+        // file and does not care that it is gone. Measured 2026-11-09, the same mistake as `stop`
+        // had — the command said "removed" and the stream kept playing.
         if FileManager.default.fileExists(atPath: plist.path) {
+            try? LaunchAgent.unload()
             try FileManager.default.removeItem(at: plist)
             log("removed \(plist.path)")
         } else {
+            try? LaunchAgent.unload()
             log("nothing to remove at \(plist.path)")
         }
-        log("to unload it: launchctl unload \(plist.path) 2>/dev/null")
+        if LaunchAgent.isLoaded() {
+            log(
+                "it is still loaded — launchctl refused the unload; try `launchctl bootout gui/$(id -u) \(plist.path)`"
+            )
+        } else {
+            log("and it is no longer loaded: nothing will start it again at login")
+        }
     case "status":
         let installed = FileManager.default.fileExists(atPath: plist.path)
         log("plist: \(installed ? plist.path : "not installed")")

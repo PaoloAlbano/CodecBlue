@@ -36,6 +36,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -94,10 +95,25 @@ typedef struct {
     _Atomic uint32_t sampleRate;
     _Atomic uint32_t channels;
     _Atomic uint32_t generation;    // bumped when the driver restarts, so a reader can notice
+    /// The pid of the process feeding this ring, or 0. Written by codecblue, read here.
+    ///
+    /// It exists because the driver cannot answer "is anyone going to fill this device?" by
+    /// itself, and the obvious test — "has anyone opened it" — is circular: the device would be
+    /// hidden because nobody uses it, and nobody could use it because it is hidden. So the fact
+    /// comes from the only process that knows it. See `device_should_hide`.
+    ///
+    /// A pid and not a flag, and that is the whole point. The first version stored 1/0 and set it
+    /// back on the way out — which works until the process does not get a way out. Measured
+    /// 2026-11-09: `codecblue` was killed mid-stream, the ring kept `feeding = 1` with no process
+    /// behind it, and the device stayed in the output list forever, accepting audio from anyone who
+    /// chose it. A flag nobody can clear is a flag that lies; a pid can be checked.
+    _Atomic int32_t feeder;
     float            samples[kRingSamples];
 } CodecBlueRing;
 
 static CodecBlueRing* gRing = NULL;
+static void ring_open(void);
+static int ring_feeder_alive(void);
 
 static void ring_open(void) {
     if (gRing != NULL) { return; }
@@ -167,6 +183,75 @@ typedef struct {
 } CodecBlueDriver;
 
 static CodecBlueDriver gDriver = { .refCount = 1 };
+
+// A device that accepts audio and throws it away is worse than a device that is not there: every
+// app that picks "CodecBlue" plays into silence, with no error anywhere. So the device is hidden
+// while nothing can feed it.
+//
+// Three states, and the third is the one that matters: a device hidden *underneath* an app that
+// has it open turns a silence into a stream of errors the app cannot explain. So `started` wins —
+// if the host has it open, it is visible, whatever the ring says.
+static int device_should_hide(void) {
+    if (gDriver.started > 0) { return 0; }
+    if (gRing != NULL && ring_feeder_alive()) { return 0; }
+    return 1;
+}
+
+// Whether the process that said it was feeding this ring still exists.
+//
+// `kill(pid, 0)` asks "may I signal this process", which for our own uid is the same question as
+// "does it exist". The pid is never reused while the entry stays: a dead feeder is noticed within
+// half a second and the field is cleared, so a recycled pid would have to be handed out in that
+// window and then claim the ring — which would take a deliberate act, not bad luck.
+//
+// This is what makes the rule survive a crash, a `kill -9`, a panic and a reboot. The alternative —
+// clearing the flag in a `defer` — was measured to fail the first time the process was killed.
+static int ring_feeder_alive(void) {
+    int32_t pid = atomic_load(&gRing->feeder);
+    if (pid <= 0) { return 0; }
+    if (kill((pid_t)pid, 0) == 0) { return 1; }
+    if (errno != ESRCH) { return 1; }  // EPERM: it exists, it is just not ours to signal
+    atomic_store(&gRing->feeder, 0);
+    return 0;
+}
+
+// The host caches `IsHidden`, so saying it changed is the only way the list is rebuilt.
+static void hide_state_maybe_changed(int previous) {
+    if (gDriver.host == NULL) { return; }
+    if (previous == device_should_hide()) { return; }
+    AudioObjectPropertyAddress changed = {
+        kAudioDevicePropertyIsHidden,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    gDriver.host->PropertiesChanged(gDriver.host, kDeviceObjectID, 1, &changed);
+}
+
+// The driver has no thread of its own: the ring is a file, and the only way to notice that
+// `feeding` changed is to look. Half a second is the resolution of "the icon was pressed" —
+// fast enough that nobody sees the device linger, slow enough to cost nothing.
+static void* feeding_watcher(void* unused) {
+    (void)unused;
+    int previous = device_should_hide();
+    for (;;) {
+        struct timespec pause = { .tv_sec = 0, .tv_nsec = 500 * 1000 * 1000 };
+        nanosleep(&pause, NULL);
+        ring_open();
+        // Checked every tick, not only when the device is visible-or-not is being decided.
+        //
+        // `device_should_hide` returns early when the host has the device open, so a dead feeder
+        // was only noticed once nothing had it open — and the case that matters is exactly the one
+        // where the device *is* open: a crash leaves CodecBlue as the system output, coreaudiod
+        // keeps it running, and the stale pid sat in the ring until the listener changed output by
+        // hand. Measured 2026-11-09. Clearing it here means the ring tells the truth within half a
+        // second of the process dying, whatever else is going on.
+        ring_feeder_alive();
+        hide_state_maybe_changed(previous);
+        previous = device_should_hide();
+    }
+    return NULL;
+}
+
 
 // The driver restarts with coreaudiod, and macOS remembers a volume per device UID. If the driver
 // always initialised to full scale it would fight the system: the slider would jump back on every
@@ -263,6 +348,16 @@ static OSStatus driver_Initialize(AudioServerPlugInDriverRef inDriver,
         volume_load();
     }
     ring_open();
+    // Started here and never stopped: the driver lives as long as coreaudiod, and a thread that
+    // sleeps half a second at a time costs less than the bookkeeping needed to end it.
+    static int watcherStarted = 0;
+    if (!watcherStarted) {
+        watcherStarted = 1;
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, feeding_watcher, NULL) == 0) {
+            pthread_detach(thread);
+        }
+    }
     trace("Initialize");
     return kAudioHardwareNoError;
 }
@@ -611,7 +706,9 @@ static OSStatus driver_GetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
             return kAudioHardwareNoError;
         case kAudioDevicePropertyDeviceCanBeDefaultDevice:
         case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
-            *(UInt32*)outData = 1;
+            // A hidden device that stays eligible as the default is hidden only halfway: the
+            // system would keep offering it for the one job it cannot do.
+            *(UInt32*)outData = (UInt32)(device_should_hide() ? 0 : 1);
             *outDataSize = sizeof(UInt32);
             return kAudioHardwareNoError;
         case kAudioDevicePropertyLatency:
@@ -620,7 +717,7 @@ static OSStatus driver_GetPropertyData(AudioServerPlugInDriverRef inDriver, Audi
             *outDataSize = sizeof(UInt32);
             return kAudioHardwareNoError;
         case kAudioDevicePropertyIsHidden:
-            *(UInt32*)outData = 0;
+            *(UInt32*)outData = (UInt32)device_should_hide();
             *outDataSize = sizeof(UInt32);
             return kAudioHardwareNoError;
         case kAudioDevicePropertyZeroTimeStampPeriod:

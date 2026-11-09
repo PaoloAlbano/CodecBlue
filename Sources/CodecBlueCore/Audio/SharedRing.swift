@@ -22,6 +22,9 @@ public final class SharedRing: @unchecked Sendable {
     private let readIndex: UnsafeMutablePointer<UInt64>
     private let sampleRateField: UnsafeMutablePointer<UInt32>
     private let channelsField: UnsafeMutablePointer<UInt32>
+    /// The pid of the process feeding this ring, or 0. Written here, read by the driver, which
+    /// uses it to hide the device when nobody can fill it — see `CodecBlueDriver.c`.
+    private let feederField: UnsafeMutablePointer<Int32>
     private let samples: UnsafeMutablePointer<Float>
 
     public enum RingError: Error, CustomStringConvertible {
@@ -50,6 +53,7 @@ public final class SharedRing: @unchecked Sendable {
         readIndex = map.advanced(by: 8).assumingMemoryBound(to: UInt64.self)
         sampleRateField = map.advanced(by: 16).assumingMemoryBound(to: UInt32.self)
         channelsField = map.advanced(by: 20).assumingMemoryBound(to: UInt32.self)
+        feederField = map.advanced(by: 28).assumingMemoryBound(to: Int32.self)
         samples = map.advanced(by: Self.headerBytes).assumingMemoryBound(to: Float.self)
     }
 
@@ -70,6 +74,63 @@ public final class SharedRing: @unchecked Sendable {
         sampleRateField.pointee = UInt32(rate)
     }
     public var channelCount: Int { Int(channelsField.pointee) }
+
+    /// Says that this process is (or is no longer) feeding this ring.
+    ///
+    /// The driver cannot work this out for itself, and the obvious test — "has anyone opened the
+    /// device" — is circular: the device would be hidden because nobody uses it, and nobody could
+    /// use it because it is hidden. So the fact comes from the only process that knows it.
+    ///
+    /// A pid and not a boolean, because a boolean has to be cleared by the process that set it and
+    /// that is exactly what does not happen when the process is killed. Measured 2026-11-09: after
+    /// `kill -9` mid-stream the ring still said "feeding", the device stayed in the output list
+    /// with nothing behind it, and every app that chose it played into silence. The driver checks
+    /// whether the pid still exists, so a crash clears itself.
+    public var feeder: Int32 {
+        get { feederField.pointee }
+        set { feederField.pointee = newValue }
+    }
+
+    /// Whether this process is the one feeding the ring.
+    ///
+    /// Setting it to `false` only clears the field **if it is still ours**, and that "if" is the
+    /// whole of this property. The field holds one pid and there can be more than one process that
+    /// wants to feed: the launchd agent, and whatever `codecblue system` someone runs by hand to
+    /// try something. Measured 2026-11-09, exactly that way round — a test run of `codecblue
+    /// system` was killed by `timeout`, its `defer` wrote 0, and the field had belonged to the
+    /// agent for twenty minutes. The agent kept streaming, the driver hid the device because
+    /// nobody was feeding it, macOS fell back to the headphones, and nothing anywhere said so:
+    /// `codecblue status` reported `link_quality unknown`, `ring_frames 0`, and a battery
+    /// percentage, which reads as "all fine" and was not.
+    ///
+    /// So leaving is conditional and joining is not: a process that starts feeding takes the field
+    /// (it is the newest claimant, and the driver only asks whether the pid is alive), and a
+    /// process that stops only lets go of what it still holds.
+    public var feeding: Bool {
+        get { feeder == Int32(ProcessInfo.processInfo.processIdentifier) }
+        set {
+            let me = Int32(ProcessInfo.processInfo.processIdentifier)
+            if newValue {
+                // Claim only a field that is free or whose holder is dead. Overwriting a live
+                // claim is how the agent's pid got replaced by a test run's pid, and then cleared
+                // by that test run's `defer`: the agent went on streaming with the driver told
+                // nobody was feeding it.
+                let holder = feeder
+                if holder == 0 || holder == me || !Self.isAlive(holder) { feeder = me }
+            } else if feeder == me {
+                feeder = 0
+            }
+        }
+    }
+
+    /// Whether a pid names a process that still exists. Same question the driver asks with
+    /// `kill(pid, 0)`, and the same answer for the same reason: for our own uid, "may I signal it"
+    /// is "does it exist".
+    static func isAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno != ESRCH
+    }
 
     /// Frames written by the driver but not yet taken by us. This is the queue depth the stream
     /// has to keep small: it is the delay between the app and the headphones.

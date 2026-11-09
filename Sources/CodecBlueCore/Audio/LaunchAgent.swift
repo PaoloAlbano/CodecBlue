@@ -59,6 +59,17 @@ public enum LaunchAgent {
                 <true/>
                 <key>ThrottleInterval</key>
                 <integer>5</integer>
+                <!-- How long launchd waits for the process to exit after SIGTERM before it sends
+                     SIGKILL. The default is 20 seconds, and it is a trap here: a teardown that
+                     hands the headphones back takes a few seconds, but a teardown that is *stuck*
+                     — the link not falling, macOS not answering — would be killed mid-way, and
+                     the headphones would be left taken with nothing left to give them back.
+                     Measured 2026-11-09: `codecblue stop` reported "unloaded" and the log stopped
+                     at "asking macOS to reconnect the headphones", with no line after it. That is
+                     the signature of a SIGKILL, and the default 20 s is why the wait looked like
+                     a hang. 30 gives a slow hand-back room and still bounds it. -->
+                <key>ExitTimeOut</key>
+                <integer>30</integer>
                 <key>StandardOutPath</key>
                 <string>\(logPath)</string>
                 <key>StandardErrorPath</key>
@@ -192,6 +203,17 @@ public enum LaunchAgent {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return String(decoding: data, as: UTF8.self).contains(label)
+    }
+
+    /// `launchctl` for the menu bar item, which is a different label with a different plist.
+    static func unloadMenuBarItem() {
+        run(
+            "/bin/launchctl",
+            ["unload", MenuBarLoginItem.plistURL.path])
+    }
+
+    static func runLaunchctl(_ arguments: [String]) -> Int32 {
+        run("/bin/launchctl", arguments)
     }
 
     @discardableResult

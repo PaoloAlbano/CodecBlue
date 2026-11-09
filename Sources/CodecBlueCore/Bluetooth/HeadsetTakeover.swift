@@ -282,26 +282,107 @@ public final class HeadsetTakeover: @unchecked Sendable {
 
     // MARK: - Hand back
 
+    /// How much of the link to give up when handing the headphones back.
+    public enum HandBackStyle: Sendable {
+        /// Drop the link and let macOS connect the headphones from scratch. Costs ~8 s.
+        case reconnect
+        /// Close our channels, keep the link, ask bluetoothd for its profiles back. Falls back to
+        /// `.reconnect` if macOS does not publish the headphones' audio in `inPlaceWait`.
+        case inPlace
+
+        public static func named(_ text: String) -> HandBackStyle? {
+            switch text.lowercased().replacingOccurrences(of: "_", with: "-") {
+            case "reconnect": return .reconnect
+            case "inplace", "in-place": return .inPlace
+            default: return nil
+            }
+        }
+    }
+
+    /// How long `.inPlace` waits before falling back to dropping the link.
+    public var inPlaceWait: TimeInterval = 3
+
+    /// How long the reconnect path waits for macOS to publish the headphones' audio before giving
+    /// up and saying so. Ten seconds covers the 7.4 s measured on 2026-11-09 with room to spare.
+    public var reconnectWait: TimeInterval = 10
+
     /// Closes our channels and lets macOS connect the headphones as usual.
-    public func handBack() async {
+    public func handBack(_ style: HandBackStyle = .reconnect) async {
         guard let device else { return invalidateAll() }
         signaling?.close()
         signalSession?.closeChannel(device, psm: AVDTP.psm)
         signaling = nil
         for extra in extraChannels { extra.session.closeChannel(device, psm: extra.psm) }
         for rfcomm in rfcommChannels { rfcomm.session.closeRFCOMM(device, channel: rfcomm.channel) }
+        extraChannels.removeAll()
+        rfcommChannels.removeAll()
         let control = sessions.first
+
+        if style == .inPlace {
+            // Let go of everything of ours first, then ask bluetoothd to bring its profiles back
+            // on the link that is already up. Order matters: with our sessions still alive
+            // bluetoothd does nothing at all (measured 2026-11-09, twelve seconds of silence).
+            invalidateAll()
+            control?.connect(device)
+            let started = Date()
+            while Date().timeIntervalSince(started) < inPlaceWait {
+                if SystemHeadphoneAudio.hasDevice(address: address) {
+                    log(
+                        String(
+                            format: "macOS took the headphones back in place after %.0f ms",
+                            Date().timeIntervalSince(started) * 1000))
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            log(
+                String(
+                    format:
+                        "macOS did not take the headphones back in place within %.0f s: dropping the link",
+                    inPlaceWait))
+            control?.cancelConnection(device, force: true)
+        }
+
+        let dropped = Date()
         control?.cancelConnection(device, force: true)
         // Wait for the link to drop, then ask macOS to reconnect normally (no grabbing).
         for _ in 0..<50 {
             guard let up = try? await control?.lookup(address: address).isLinkUp, up else { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
-        try? await Task.sleep(for: .seconds(1))
+        // How long the link took to fall. It is the largest part of a hand-back and it was never
+        // measured: the old code slept a flat second here and reported nothing, so "the hand-back
+        // takes seven seconds" had no breakdown behind it.
+        log(
+            String(
+                format: "the link fell %.0f ms after the forced disconnect",
+                Date().timeIntervalSince(dropped) * 1000))
         log("asking macOS to reconnect the headphones")
+        let asked = Date()
         control?.connect(device)
-        try? await Task.sleep(for: .seconds(3))
         invalidateAll()
+        // Wait for the result instead of sleeping for a guess.
+        //
+        // This used to be `sleep(3)` and a return, which made the hand-back *look* like it took
+        // three seconds while the headphones were still missing for five more. Measured
+        // 2026-11-09: `asking macOS to reconnect` at 13:05:44.2, macOS publishing the headphones'
+        // audio at 13:05:51.6 — 7.4 s, and the process had already exited. A number in a log is
+        // only useful if it is the number the listener experiences.
+        while Date().timeIntervalSince(asked) < reconnectWait {
+            if SystemHeadphoneAudio.hasDevice(address: address) {
+                log(
+                    String(
+                        format: "macOS has the headphones again after %.1f s",
+                        Date().timeIntervalSince(asked)))
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        log(
+            String(
+                format:
+                    "macOS has not published the headphones' audio after %.0f s: if it does not, put them in the case for a few seconds",
+                reconnectWait))
     }
 
     private func invalidateAll() {

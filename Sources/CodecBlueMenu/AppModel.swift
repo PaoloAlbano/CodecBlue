@@ -43,17 +43,47 @@ final class AppModel: ObservableObject {
     /// Mode. It is the difference between ~50 kbps and ~500, so a stream that crackles should be
     /// able to say "the link quality mode is off" without anyone reading a log.
     @Published private(set) var linkQuality = "unknown"
-    /// What the link actually carried, in kbit/s. The number that decides whether a level is
-    /// usable at all: HQ asks 990 and this link carries ~530, so "HQ" here means half the audio
-    /// thrown away. Zero means "not measured yet", and the menu then says nothing about fit.
+    /// What a window that *dropped audio* measured: the link's real ceiling, in kbit/s.
+    ///
+    /// This is the only number allowed to decide whether a level fits. Zero means "not measured
+    /// yet", and the menu then says nothing about fit — a menu that guesses is worse than one that
+    /// admits it does not know.
     @Published private(set) var linkKbps = 0.0
+
+    /// What the link has demonstrably carried, in kbit/s. A *floor*, not a ceiling.
+    ///
+    /// Kept apart from `linkKbps` on purpose, and the separation is the whole point: a stream
+    /// paced to real time reports "kept up" on a link with any amount of spare room, so 336 kbps
+    /// carried says nothing about whether 990 would fit. Feeding this into the fit test would
+    /// claim HQ "gives 330 here" on a link that has never been asked to try — measured 2026-11-09,
+    /// and the first version of this did exactly that.
+    @Published private(set) var linkFloorKbps = 0.0
     /// The rate the stream is encoding at, which decides what the three levels are worth: at
     /// 44.1 kHz they are 909 / 606 / 303, not 990 / 660 / 330.
     @Published private(set) var streamRate = 48000
+    /// Whether the icon starts at login. Read from the installed launch item, not from a
+    /// preference: two places to remember the same thing is two places to disagree.
+    @Published private(set) var startsAtLogin = MenuBarLoginItem.isInstalled
 
     private var timer: Timer?
+    /// Whether the menu is on screen right now.
+    ///
+    /// The timer keeps polling so the icon stays honest, but it does not *publish* while the menu
+    /// is open. Every published change rebuilds the menu, and a rebuild closes whatever submenu is
+    /// open — measured 2026-11-09, reported as "as soon as the latency part refreshes, the
+    /// submenus close": the timer fires every two seconds, so a submenu could not stay open long
+    /// enough to be clicked. A status line that is two seconds stale is invisible; a menu that
+    /// closes under the pointer is not.
+    private var menuIsOpen = false
     /// Where the last choice is remembered. `UserDefaults` is the right size for one string.
     private let selectionKey = "codecblue.selectedAddress"
+
+    /// The one instance, so the app delegate's Cmd-Q can reach `quit()`.
+    ///
+    /// Cmd-Q is handled by AppKit before any SwiftUI button is involved, so without this the
+    /// keyboard would keep the old behaviour — icon gone, stream running — and only the menu item
+    /// would stop it. Two ways to quit with two different outcomes is exactly the bug being fixed.
+    static private(set) weak var shared: AppModel?
 
     init() {
         selectedAddress = UserDefaults.standard.string(forKey: selectionKey)
@@ -65,6 +95,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.refresh() }
         }
         RunLoop.main.add(timer!, forMode: .common)
+        AppModel.shared = self
     }
 
     // MARK: - What the menu shows
@@ -98,6 +129,15 @@ final class AppModel: ObservableObject {
     ///
     /// Not looked up from a table any more: the stream now sits on rungs that have no name, and
     /// the encoder's own number is the only thing that can say "492 kbps".
+    /// The bitrate the playing rung is producing, as a number, for the menu line.
+    ///
+    /// `nil` when nothing is playing: a number next to a level that is not producing anything is
+    /// the "HQ · 990 kbps" mistake in a smaller font.
+    var playingKbps: Int? {
+        guard let kbps = Int(bitrateKbps), kbps > 0 else { return nil }
+        return kbps
+    }
+
     var qualityKbps: String {
         guard let kbps = Int(bitrateKbps), kbps > 0 else { return "" }
         return "\(kbps) kbps"
@@ -107,7 +147,14 @@ final class AppModel: ObservableObject {
         var parts = ["latency \(latencyMilliseconds) ms"]
         // The link's measured capacity, when there is one, and only then: "0 kbps" would read as
         // a broken link, and the honest answer before a measurement is silence.
-        if linkKbps > 0 { parts.append(String(format: "link %.0f kbps", linkKbps)) }
+        // The ceiling when it is known, because that is a limit; otherwise the floor, worded as
+        // what it is. "link 336 kbps" on a link nobody has pushed would read as a limit, and the
+        // whole complaint being fixed here is numbers presented as promises.
+        if linkKbps > 0 {
+            parts.append(String(format: "link carries %.0f kbps", linkKbps))
+        } else if linkFloorKbps > 0 {
+            parts.append(String(format: "link has done %.0f kbps", linkFloorKbps))
+        }
         parts.append("\(skips) skipped")
         parts.append("link quality \(linkQuality)")
         return parts.joined(separator: " · ")
@@ -115,7 +162,30 @@ final class AppModel: ObservableObject {
 
     // MARK: - Actions
 
+    /// Called when the menu appears, so polling stops rebuilding it.
+    func menuOpened() {
+        // Refresh *before* the flag, so the menu draws with current numbers.
+        //
+        // Reported 2026-11-09: "the headphones are in the case but the menu still says they are
+        // connected". They were: the last publish happened while they were still out, and this
+        // method only stopped publishing without ever taking a fresh reading. The menu opened on
+        // whatever was true up to two seconds earlier, which for a state that changes when a lid
+        // closes is the wrong two seconds. Publishing once here is safe — the menu is not drawn
+        // yet, so nothing can be closed by it.
+        refresh()
+        menuIsOpen = true
+    }
+
+    /// Called when it closes: refresh once, so the next open shows current numbers.
+    func menuClosed() {
+        menuIsOpen = false
+        refresh()
+    }
+
     func refresh() {
+        // Polling continues while the menu is open — the icon depends on it — but nothing is
+        // published, because publishing is what closes the submenu the pointer is in.
+        guard !menuIsOpen else { return }
         headphones = BluetoothHeadphone.audioDevices()
         if let ring = try? SharedRing() { deviceRate = ring.sampleRate }
         // A pair that was chosen and has since been unpaired: forget it rather than showing a
@@ -147,7 +217,8 @@ final class AppModel: ObservableObject {
         latencyMilliseconds = Int(values["latency_ms"] ?? "0") ?? 0
         skips = values["skips"] ?? "—"
         linkQuality = values["link_quality"] ?? "unknown"
-        linkKbps = Double(values["link_kbps"] ?? "0") ?? 0
+        linkKbps = Double(values["link_ceiling"] ?? "0") ?? 0
+        linkFloorKbps = Double(values["link_floor"] ?? "0") ?? 0
         streamRate = Int(values["sample_rate"] ?? "48000") ?? 48000
         note = nil
     }
@@ -218,6 +289,23 @@ final class AppModel: ObservableObject {
         return String(rung)
     }
 
+    /// Turns "start at login" on or off, and says so if it could not.
+    func toggleLoginItem() {
+        if startsAtLogin {
+            MenuBarLoginItem.remove()
+            startsAtLogin = MenuBarLoginItem.isInstalled
+            note = startsAtLogin ? "could not remove the login item" : nil
+            return
+        }
+        do {
+            try MenuBarLoginItem.install()
+            note = nil
+        } catch {
+            note = "could not start at login: \(error.localizedDescription)"
+        }
+        startsAtLogin = MenuBarLoginItem.isInstalled
+    }
+
     func start() {
         guard let address = selectedAddress else {
             note = "no headphones chosen"
@@ -241,12 +329,31 @@ final class AppModel: ObservableObject {
     }
 
     func stop(keepSelection: Bool = true) {
-        _ = ControlClient.send("quit")
-        // And unload the agent, or launchd's KeepAlive would start it again five seconds later —
-        // which is the right behaviour for a crash and the wrong one for a deliberate stop.
+        // Unload the agent first, then ask the stream to stop.
+        //
+        // The order looks arbitrary and is not. `unload` sends SIGTERM, which the stream now
+        // handles by stopping politely and handing the headphones back — but the hand-back takes
+        // a few seconds (the link has to drop, then macOS has to reconnect), and unloading also
+        // removes the thing that would restart it. Asking the socket first and unloading
+        // immediately after would race a teardown that has not finished.
+        //
+        // Keeping the agent loaded and only sending `quit` is worse: KeepAlive restarts the stream
+        // five seconds later, which is right for a crash and wrong for a deliberate stop.
         try? LaunchAgent.unload()
+        _ = ControlClient.send("quit")
         if !keepSelection { selectedAddress = nil }
-        refresh()
+        // The stream is still handing the headphones back; the icon should say so rather than
+        // flipping to "not streaming" while the link is still ours.
+        note = "stopping: handing the headphones back to macOS"
+        // The class is already @MainActor, so this inherits it: no annotation needed, and adding
+        // one would suggest the isolation was in doubt.
+        Task {
+            // A little longer than the teardown takes, so the note does not disappear while it is
+            // still true.
+            try? await Task.sleep(for: .seconds(7))
+            note = nil
+            refresh()
+        }
     }
 
     /// Writes the rate into the ring's header, which the driver reads when coreaudiod loads it.
@@ -287,9 +394,33 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(URL(fileURLWithPath: LaunchAgent.logPath))
     }
 
+    /// Quit means quit: the icon and the stream go together.
+    ///
+    /// Asked 2026-11-09: "can we make it so that when I quit it actually stops CodecBlue?" Yes, and
+    /// the previous behaviour was defensible in the wrong direction. The argument for leaving the
+    /// stream running was that quitting a menu bar app should not stop the music — true for a
+    /// player, false here, because this app is not playing anything. It is holding the headphones
+    /// away from macOS, and a process you can no longer see is holding them on your behalf.
+    ///
+    /// The old arrangement had one honest justification and it was not about the music: the stream
+    /// survives a crash, and that is worth keeping. It is kept — a crash is not a Quit. `terminate`
+    /// is only reached by a deliberate press, and Cmd-Q is routed here too (see `AppDelegate`), so
+    /// there is no path where the icon disappears and the stream keeps running.
+    ///
+    /// The hand-back takes a few seconds, so the app waits for it rather than exiting into a
+    /// half-finished teardown: `stop` is synchronous about the unload and the socket, and the
+    /// remaining wait is the link dropping and macOS reconnecting, which outlives us harmlessly.
     func quit() {
-        // Leave the stream running: quitting a menu bar app should not stop the music. The
-        // LaunchAgent owns it, and `Stop streaming` is the way to stop it.
+        quitWithoutTerminating()
         NSApplication.shared.terminate(nil)
+    }
+
+    /// The stop half of `quit()`, for the path where AppKit is already terminating us.
+    ///
+    /// Split because `applicationShouldTerminate` cannot call `terminate` again — that is a
+    /// re-entrant quit, and AppKit answers it with a beep and no exit.
+    func quitWithoutTerminating() {
+        guard isStreaming || LaunchAgent.isLoaded() else { return }
+        stop()
     }
 }

@@ -270,6 +270,46 @@ public final class LDACEncoder {
         return out
     }
 
+    /// What a rung is worth at this rate, without encoding anything.
+    ///
+    /// `bitrateKbps` cannot answer this: `ldacBT_get_bitrate` reports the last frame encoded, so
+    /// immediately after `move(toRung:)` it still reports the rung we just left. Measured
+    /// 2026-11-09, in the log of a real stream:
+    ///
+    ///     quality: LDAC HQ does not fit this link (611 kbps carried, 20% dropped): settled on 990
+    ///
+    /// — a sentence that says the level did not fit and then names the level that did not fit.
+    /// The same stale number appeared in `bitrate: down to …` and `bitrate: up to …`.
+    ///
+    /// Cached because `ladder` builds a probe encoder and encodes forty frames: fine once, wrong
+    /// on a path that runs every time the adapter moves.
+    public static func nominalKbps(rung: Int, sampleRate: Int = 48000) -> Int? {
+        let ladder = cachedLadder(sampleRate: sampleRate)
+        return rung >= 0 && rung < ladder.count ? ladder[rung] : nil
+    }
+
+    /// Guarded by a lock rather than an actor: the callers are synchronous, and an actor would
+    /// make every log line at a rung change into an await.
+    private static let ladderCache = LadderCache()
+
+    final class LadderCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Int: [Int]] = [:]
+
+        func value(for sampleRate: Int, build: () -> [Int]) -> [Int] {
+            lock.lock()
+            defer { lock.unlock() }
+            if let hit = values[sampleRate] { return hit }
+            let fresh = build()
+            values[sampleRate] = fresh
+            return fresh
+        }
+    }
+
+    static func cachedLadder(sampleRate: Int) -> [Int] {
+        ladderCache.value(for: sampleRate) { ladder(sampleRate: sampleRate) }
+    }
+
     public var quality: Quality {
         get { Quality(rawValue: ldacBT_get_eqmid(handle)) ?? .high }
         set { _ = ldacBT_set_eqmid(handle, newValue.rawValue) }

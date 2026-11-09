@@ -44,12 +44,17 @@ and takes over **only your headphones' audio channels**:
 2. It negotiates the codec itself (AVDTP) and streams audio encoded with **LDAC**. aptX, AAC
    and SBC are the plan, not a claim: a pair of headphones that offers no LDAC endpoint gets an
    error that says so, instead of a configuration puzzle.
-3. Audio comes from a **CodecBlue virtual output device**: pick it like any other output.
-4. **Calls need a hand, for now.** CodecBlue holds the headphones' hands-free channel and
-   refuses calls on it, so a call app cannot quietly open a SCO link and starve the stream.
-   The hand-back itself is not automatic yet: `codecblue release ADDR` drops the link and
-   lets macOS reconnect, and starting the stream again takes the headphones back. Automatic
-   hand-off during a call is the next thing to build.
+3. Audio comes from a **CodecBlue virtual output device**. It appears in the output list only
+   while a stream is running, and starting the stream selects it for you: the device is hidden
+   when nothing can feed it, because a device that accepts audio and throws it away is worse than
+   one that is not there. When the stream stops, your previous output comes back.
+4. **Calls work, by giving the headphones back.** CodecBlue holds the headphones' hands-free
+   channel and refuses calls on it, so a call app cannot quietly open a SCO link and starve the
+   stream. When a call application opens the microphone, CodecBlue hands the headphones to macOS
+   — which is what makes the microphone work — and takes them back when the call ends. During the
+   call you hear in AAC, not LDAC: 330 kbps of LDAC does not fit beside a call link, and every
+   implementation makes the same trade. The microphone is the headphones' own, at call quality.
+   `--no-call-monitor` turns the hand-off off, and `codecblue release ADDR` does it by hand.
 
 Keyboards, mice and every other Bluetooth device stay with macOS and keep working.
 
@@ -124,6 +129,11 @@ Open **CodecBlue** from `~/Applications/CodecBlue/` (or run `open ~/Applications
 It lives in the menu bar: pick your headphones, press **Start streaming**, and every app now
 plays through them in LDAC. Closing the window does not stop the music — the agent owns the
 stream, and brings it back when the headphones do.
+
+The icon is a remote control, not the stream: quitting it leaves the music playing, which is why
+the menu spells out the difference between **Stop streaming** and **Quit the icon**. Turn on
+**Start at login** so the icon is there after a reboot; without it nothing brings it back, and the
+only symptom is an icon that is not there.
 
 From the menu you can also change the LDAC level while it plays — the whole ladder, with the
 rung this link would actually use ticked — and the device's sample rate.

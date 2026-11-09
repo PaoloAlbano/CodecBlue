@@ -18,6 +18,11 @@ APP_DIR := $(HOME)/Applications/CodecBlue
 # `.build/out/Products/Debug` is the directory it points at and which `swift package clean` deletes.
 BIN := .build/debug
 
+# The C compiler for the driver's own rule test. The harness includes the driver source, which
+# includes CoreAudio headers from the SDK, so the SDK has to be named explicitly: `clang` on its
+# own resolves frameworks from /System/Library, where a plug-in header does not exist.
+CC := clang -isysroot $(shell xcrun --show-sdk-path)
+
 .PHONY: all build test selftest format lint check menu driver install uninstall release clean distclean help
 
 all: build
@@ -49,6 +54,9 @@ build:
 test: build
 	@echo "self-test:"
 	@$(BIN)/codecblue-selftest
+	@echo "driver rule:"
+	@$(CC) -O1 -o $(BIN)/hide-rule Tests/Driver/hide-rule.c -framework CoreFoundation
+	@$(BIN)/hide-rule
 	@echo "smoke test:"
 	@$(BIN)/codecblue version
 

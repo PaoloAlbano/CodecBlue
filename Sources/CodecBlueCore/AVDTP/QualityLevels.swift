@@ -44,6 +44,21 @@ public enum QualityLevels {
     /// - Parameter capacityKbps: what the link carried. Zero or negative means "not measured
     ///   yet", and then nothing is claimed to fit: a menu that guesses is worse than one that
     ///   says it does not know.
+    /// The three levels the menu offers: HQ, SQ and LQ, and nothing else.
+    ///
+    /// Asked 2026-11-09: "we said we would leave only HQ, SQ, LQ, and when the stream starts the
+    /// kbps would appear beside them — why haven't you done it yet?" Because the two unnamed rungs
+    /// were still in the list, each needing a sentence to explain where it sat, and a menu of five
+    /// where two need explaining is a menu of three plus an argument.
+    ///
+    /// The unnamed rungs are not a loss. They exist so the adapter can land between SQ and LQ when
+    /// a link carries ~450 kbps, and that is a decision the stream makes for itself — it is not a
+    /// preference anyone expresses by hand. Choosing "HQ" on such a link still ends up on 492.
+    public static func menuLevels(capacityKbps: Double, sampleRate: Int = 48000) -> [Level] {
+        describe(capacityKbps: capacityKbps, sampleRate: sampleRate)
+            .filter { $0.rung == 0 || $0.rung == 1 || $0.rung == 4 }
+    }
+
     public static func describe(capacityKbps: Double, sampleRate: Int = 48000) -> [Level] {
         let ladder = LDACEncoder.ladder(sampleRate: sampleRate)
         let pick =
@@ -59,17 +74,25 @@ public enum QualityLevels {
         }
     }
 
-    /// The line a log or the command line should show:
-    /// `HQ 990 kbps — too much for this link (530)`.
+    /// The line a log or the command line should show: `HQ 396 kbps — capped by this link (530)`.
+    ///
+    /// Same rule as `menuLabel`: the number is what the listener gets, not what the rung asks for.
+    /// A line that says "HQ 990 kbps — too much for this link" is asking the reader to do the
+    /// division that the code has already done.
     public static func label(_ level: Level, capacityKbps: Double) -> String {
+        let effective = wouldUse(level, capacityKbps: capacityKbps)
+        let number = effective ?? level.nominalKbps
         // An unnamed rung has no word to put before its bitrate, and `492 492 kbps` reads as a
         // typo. The number is the name.
-        let head =
-            level.rung == 2 || level.rung == 3
-            ? "\(level.nominalKbps) kbps"
-            : "\(level.name) \(level.nominalKbps) kbps"
-        guard capacityKbps > 0 else { return head }
+        let named = level.rung != 2 && level.rung != 3
+        let head = named ? "\(level.name) \(number) kbps" : "\(number) kbps"
+        // Same rule as the menu: no measurement, no bitrate next to a name — but the unnamed rungs
+        // keep their number, because it is their name and not a claim about the link.
+        guard capacityKbps > 0 else { return named ? level.name : head }
         let carried = String(format: "%.0f", capacityKbps)
+        if let effective, effective != level.nominalKbps {
+            return "\(head) — capped by this link (\(carried) available)"
+        }
         if level.fits { return "\(head) — fits (\(carried) available)" }
         if nothingFits(capacityKbps: capacityKbps) && level.rung == 4 {
             return "\(head) — the lowest there is (\(carried) available)"
@@ -116,38 +139,65 @@ public enum QualityLevels {
     /// word and a word needs no legend. The unnamed ones have no word, so they show the bitrate,
     /// which is the only thing that distinguishes them. The tick says which one the stream would
     /// pick here, so the menu answers "what will I get?" and not just "what exists?".
-    public static func menuLabel(_ level: Level, capacityKbps: Double) -> String {
-        // An unnamed rung has no word, so its bitrate *is* its name: printing it twice would read
-        // as a mistake, and the number is the only thing there is to say.
-        var text =
-            level.rung == 2 || level.rung == 3
-            ? "\(level.nominalKbps) kbps"
-            : "\(level.longName) · \(level.nominalKbps) kbps"
-        if level.chosen { text = "✓ " + text }
-        if capacityKbps > 0 && !level.fits && nothingFits(capacityKbps: capacityKbps)
-            && level.rung == 4
-        {
-            text += " · the lowest there is"
-        } else if capacityKbps > 0 && !level.fits {
-            // The nominal bitrate is not what the listener will hear, so the label says what they
-            // will: the rung this ceiling settles on here. "990 kbps · too much for this link" is
-            // true and useless; "990 kbps · here 396" is the same fact and answers the question.
-            if let actual = wouldUse(level, capacityKbps: capacityKbps) {
-                text += " · here \(actual) kbps"
+    public static func menuLabel(
+        _ level: Level, capacityKbps: Double, streaming: Bool = false, playingKbps: Int? = nil
+    ) -> String {
+        // The number shown is what the listener will *get*, not what the rung asks for.
+        //
+        // Reported 2026-11-09: "instead of showing HQ 990 kbps — too much for this link, if you
+        // know the max is 336 show HQ with 336 and don't show me the 990 one". That is the right
+        // rule and the earlier version had it backwards: it printed the codec's request and then
+        // appended a verdict, which made every line read as a promise followed by an apology.
+        //
+        // A level is a ceiling, so what it produces here is `wouldUse` — the highest rung at or
+        // below it that this link carries. When nothing has been measured there is no "here", and
+        // the label falls back to the codec's own number, labelled as such.
+        let effective = wouldUse(level, capacityKbps: capacityKbps)
+        let number = effective ?? level.nominalKbps
+
+        // Before a measurement, the named rungs show only their name.
+        //
+        // Asked 2026-11-09: "show just HQ without kbps, and when streaming starts we can update the
+        // menu to show the value". Right, and for a reason worth writing down: a bitrate next to a
+        // name is a claim about this link, and before a stream there is no link to make it about.
+        // "HQ · 990 kbps" was read as a promise precisely because it sat where a measurement goes.
+        // A name alone promises nothing.
+        //
+        // The numbers appear when there is something to say with them: a stream running, or a
+        // measurement. Asked 2026-11-09: "show just HQ without kbps, and when streaming starts we
+        // can update the menu to show the value". A name alone claims nothing about this link; a
+        // name with a bitrate is a claim, and it is only worth making once a link exists.
+        //
+        // The unnamed rungs are the exception, and it took a report to see it: "in the quality list
+        // I see two 'between Standard and Low' that do not make much sense to see". Two identical
+        // lines, because rungs 2 and 3 sit in the same place. For a rung with no name the bitrate
+        // is not a claim about the link — it *is* the name, and hiding it leaves nothing.
+        // `playingKbps` wins when it is there: it is the one number that is a measurement rather
+        // than a table lookup, and it is what the listener is actually hearing.
+        let showNumbers = capacityKbps > 0 || streaming
+        var text: String
+        switch level.rung {
+        case 2, 3:
+            // The two unnamed rungs are not offered any more, so this is only reached by the
+            // command line. Their number is their whole name; the position was noise.
+            text = "\(number) kbps"
+        default:
+            if let playingKbps {
+                text = "\(level.longName) · \(playingKbps) kbps"
             } else {
-                text += " · too much for this link"
+                text = showNumbers ? "\(level.longName) · \(number) kbps" : level.longName
             }
         }
+        if capacityKbps > 0, effective != nil, effective != level.nominalKbps {
+            // Said once, at the end, and only when the two differ: "High · 330 kbps" on its own
+            // would look like a typo to anyone who knows HQ is 990.
+            text += " · capped by this link"
+        }
+        if capacityKbps <= 0 { return text }
+        if level.chosen { text = "✓ " + text }
+        if nothingFits(capacityKbps: capacityKbps) && level.rung == 4 {
+            text += " · the lowest there is"
+        }
         return text
-    }
-
-    /// The word for a rung, for anywhere a listener reads it.
-    ///
-    /// "Low", not "Mobile": Sony's word for the bottom rung is Mobile Quality, which names the use
-    /// case rather than the thing, and in a list it sorts wrongly and reads ambiguously. The three
-    /// words now match the three codes — High/HQ, Standard/SQ, Low/LQ — so the menu and the
-    /// command line say the same thing in two lengths.
-    public static func longName(_ quality: LDACEncoder.Quality) -> String {
-        quality.longName
     }
 }

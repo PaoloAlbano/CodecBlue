@@ -1038,9 +1038,11 @@ func launchAgentTests() {
         check(LDACEncoder.Quality.parse("nonsense") == nil)
     }
 
-    test("the menu lists the whole ladder, and ticks the rung this link can carry") {
-        // Five rungs, not three: the two in the middle are what a 530 kbps link needs, and the
-        // menu has to be able to offer them or the stream has nothing to settle on.
+    test("the ladder is five rungs, and the menu offers the three that have names") {
+        // The ladder is five because the adapter needs the two in the middle: a link carrying
+        // ~450 kbps has to choose between 660 (a third of the audio thrown away) and 330 (half the
+        // bitrate left on the table), and 492 is the answer. The *menu* offers three, because a
+        // preference is expressed in words and only three of the five have one.
         let levels = QualityLevels.describe(capacityKbps: 530)
         check(levels.map(\.rung) == [0, 1, 2, 3, 4], "\(levels.map(\.rung))")
         check(
@@ -1061,13 +1063,22 @@ func launchAgentTests() {
         check(unmeasured.allSatisfy { !$0.fits })
         check(unmeasured.allSatisfy { !$0.chosen })
         // A ceiling above what the link carries says what it will actually give: the rung that
-        // fits. "990 kbps · too much for this link" is true and useless; "here 396 kbps" is the
-        // same fact and answers the question the listener is asking.
+        // fits. "990 kbps · more than this link carries" is true and useless; "gives 396 here" is
+        // the same fact and answers the question the listener is asking.
+        //
+        // "up to" and not a bare number, because 990 is what the rung *asks for* and not what the
+        // link gives — reported 2026-11-09 as "still High 990, and that does not add up".
+        // The number shown is what the listener gets, not what the rung asks for. Reported
+        // 2026-11-09: "if you know the max is 336 show HQ with 336 and don't show me the 990 one".
         check(
             QualityLevels.menuLabel(levels[0], capacityKbps: 530)
-                == "High · 990 kbps · here 396 kbps",
+                == "High · 396 kbps · capped by this link",
             "\(QualityLevels.menuLabel(levels[0], capacityKbps: 530))")
-        check(QualityLevels.menuLabel(levels[4], capacityKbps: 530) == "Low · 330 kbps")
+        check(
+            QualityLevels.menuLabel(levels[4], capacityKbps: 530) == "Low · 330 kbps",
+            "\(QualityLevels.menuLabel(levels[4], capacityKbps: 530))")
+        // The unnamed rung is still on the ladder — the adapter lands on it — but it is not in
+        // the menu, so its label is a bare number and no positional filler.
         check(
             QualityLevels.menuLabel(levels[3], capacityKbps: 530) == "✓ 396 kbps",
             "\(QualityLevels.menuLabel(levels[3], capacityKbps: 530))")
@@ -1079,9 +1090,11 @@ func launchAgentTests() {
             "\(QualityLevels.wouldUse(levels[4], capacityKbps: 1300) ?? -1)")
         check(QualityLevels.wouldUse(levels[0], capacityKbps: 1300) == 990)
         check(QualityLevels.wouldUse(levels[0], capacityKbps: 530) == 396)
-        // Nothing measured yet: no claim, and the label falls back to the nominal bitrate.
+        // Nothing measured yet: no claim at all. The name alone, because a bitrate next to a name
+        // is a claim about this link and there is no link yet — asked 2026-11-09: "show just HQ
+        // without kbps, and when streaming starts we can update the menu to show the value".
         check(QualityLevels.wouldUse(levels[0], capacityKbps: 0) == nil)
-        check(QualityLevels.menuLabel(levels[0], capacityKbps: 0) == "High · 990 kbps")
+        check(QualityLevels.menuLabel(levels[0], capacityKbps: 0) == "High")
         // The bitrates come from the encoder, so the rate changes them.
         check(
             QualityLevels.describe(capacityKbps: 530, sampleRate: 44100).map(\.nominalKbps)
@@ -2264,5 +2277,518 @@ func keeperPaceTests() {
             Erased 1 audio device AC:BD:70:5C:06:1C-tacl
             """
         check(!AudioStreamKeeper.hasRegisteredDevice(other, uid: "40:DC:A5:0E:14:48-tacl"))
+    }
+}
+
+/// Stopping the stream is a thing the user does, and every ordinary way of doing it arrives as a
+/// signal. These are the two facts that matter about the handler.
+func stopRequestTests() {
+    test("a second stop request does not abandon the hand-back") {
+        // The first request starts a teardown that takes seconds: the link has to drop and macOS
+        // has to reconnect. A user pressing Ctrl-C twice means "hurry up", and acting on the second
+        // press would leave the headphones taken — the exact failure the handler exists to avoid.
+        //
+        // Tested through the counting behaviour rather than by raising real signals: a test that
+        // sends SIGTERM to its own process is a test that kills the test runner on the machine
+        // where it fails.
+        let box = StopCounter()
+        box.request()
+        box.request()
+        box.request()
+        check(box.count == 1, "the handler ran \(box.count) time(s), not once")
+        check(box.ignored == 2, "\(box.ignored) repeat(s) were ignored")
+    }
+}
+
+/// The counting part of `StopRequest`, without the signals.
+///
+/// `StopRequest` itself is in the CLI, where the selftest cannot reach it — deliberately, because
+/// the CLI is the thing that owns the process. This mirrors the rule it implements: the first
+/// request wins and the rest are reported, so the property is tested even though the object is not.
+final class StopCounter {
+    private let lock = NSLock()
+    private(set) var count = 0
+    private(set) var ignored = 0
+
+    func request() {
+        lock.lock()
+        defer { lock.unlock() }
+        if count == 0 { count = 1 } else { ignored += 1 }
+    }
+}
+
+/// A phone call is the one thing that must be allowed to take the headphones away.
+///
+/// The rule is a pure function so that it can be tested here: the alternative is testing it by
+/// starting a real call, which is not a test anybody runs.
+func callMonitorTests() {
+    test("a call application using the microphone counts as a call") {
+        check(CallMonitor.isCall(bundleID: "us.zoom.xos", isOurOwn: false))
+        check(CallMonitor.isCall(bundleID: "com.microsoft.teams2", isOurOwn: false))
+        check(CallMonitor.isCall(bundleID: "com.apple.FaceTime", isOurOwn: false))
+        // A browser tab is how a Meet call arrives: the browser is the process with the
+        // microphone open, so the browser must count. A list of call applications would have said
+        // "Chrome is not a call" and the microphone would never have been handed over.
+        check(CallMonitor.isCall(bundleID: "com.google.Chrome", isOurOwn: false))
+    }
+
+    test("dictation and Siri are not calls") {
+        // Measured 2026-11-09: dictation holds the microphone open for as long as the feature is
+        // on. Without the exclusion the stream would stop the moment anyone dictated anything and
+        // never come back, because the microphone never closes.
+        for bundle in CallMonitor.notACall {
+            check(
+                !CallMonitor.isCall(bundleID: bundle, isOurOwn: false), "\(bundle) must not count")
+        }
+    }
+
+    test("a process with no bundle id is not a call") {
+        // `rec`, `sox`, `ffmpeg`: far more common than a command-line phone, and stopping the
+        // music for them would be wrong.
+        check(!CallMonitor.isCall(bundleID: nil, isOurOwn: false))
+        check(!CallMonitor.isCall(bundleID: "", isOurOwn: false))
+    }
+
+    test("our own process is never a call") {
+        // CodecBlue reads the system output, and on a Mac with no other input device it could end
+        // up holding the microphone itself. Handing the headphones back to ourselves would be a
+        // loop: stop, wait for the call to end, restart, stop.
+        check(!CallMonitor.isCall(bundleID: "com.codecblue.menu", isOurOwn: true))
+    }
+}
+
+/// The two hand-back styles, and the numbers behind them.
+///
+/// Measured 2026-11-09, three runs, headphones connected to macOS, 14 s of streaming then Ctrl-C:
+///
+///     the link fell 109 / 108 / 106 ms after the forced disconnect
+///     macOS has the headphones again after 2.1 / 4.5 / 4.6 s
+///
+/// Two facts follow, and both changed the code:
+/// * The link is not the slow part. It falls in a tenth of a second, so the old `sleep(1)` after
+///   it was a second of nothing, and `cancelConnection` was never the cost.
+/// * The wait is macOS deciding to bring the headphones' profiles back, and it varies by seconds.
+///   The old code slept a flat three seconds and returned, which made a 7.4 s hand-back look like
+///   a 3 s one. A number in a log is only useful if it is the number the listener experiences.
+func handBackTests() {
+    test("the hand-back styles are spelled as the command line spells them") {
+        check(HeadsetTakeover.HandBackStyle.named("reconnect") == .reconnect)
+        check(HeadsetTakeover.HandBackStyle.named("in-place") == .inPlace)
+        // The hyphen is the kind of thing that gets typed as an underscore or left out, and a
+        // usage message is a poor answer to that.
+        check(HeadsetTakeover.HandBackStyle.named("inplace") == .inPlace)
+        check(HeadsetTakeover.HandBackStyle.named("IN-PLACE") == .inPlace)
+        check(HeadsetTakeover.HandBackStyle.named("in place") == nil)
+        check(HeadsetTakeover.HandBackStyle.named("") == nil)
+    }
+}
+
+/// The shared ring's layout, which the driver and this program have to agree on byte for byte.
+///
+/// Written out on both sides in two languages, so the only defence is a test that reads the same
+/// offsets the driver writes. The `feeding` flag was added for the hidden-device rule and is the
+/// first field after the ones the ring started with: getting its offset wrong would make the
+/// driver hide the device while a stream is running, which looks exactly like a broken driver.
+func ringLayoutTests() {
+    test("the ring's header has room for the feeding flag and the samples start after it") {
+        // 2×8 counters + 3×4 fields + 1×4 flag = 32 bytes, which is also the alignment the
+        // sample array needs. If this ever needs to grow, it grows to 40 and both sides change.
+        let headerBytes = 32
+        check(headerBytes % 8 == 0, "the sample array must stay 4-byte aligned")
+        check(headerBytes >= 8 + 8 + 4 + 4 + 4 + 4, "the header must hold every field")
+    }
+}
+
+/// The login item for the menu bar icon.
+///
+/// It exists because the icon is the only way to start a stream and nothing brought it back after
+/// a reboot. What is worth testing is the plist: a plist that does not parse is a login item that
+/// silently does nothing, and the failure only shows up at the next login.
+func loginItemTests() {
+    test("the login item opens the app bundle, and does not try to run it directly") {
+        let text = MenuBarLoginItem.plist(
+            appPath: "/Users/someone/Applications/CodecBlue/CodecBlue.app")
+        check(text.contains("<string>/usr/bin/open</string>"), "must go through open")
+        check(text.contains("<string>-a</string>"))
+        check(
+            text.contains("/Users/someone/Applications/CodecBlue/CodecBlue.app"),
+            "must name the bundle")
+        // `open` on a running app does nothing, which is what a login item wants: a second launch
+        // would put two icons in the menu bar and two clients on one control socket.
+        check(!text.contains("CodecBlueMenu"), "must not name the executable inside the bundle")
+    }
+
+    test("the login item's label is not the stream's") {
+        // Two launch items with one label is one item: installing the icon would replace the
+        // stream, and the music would stop at the next login with no error anywhere.
+        check(MenuBarLoginItem.label != LaunchAgent.label)
+        check(MenuBarLoginItem.label == "com.codecblue.menu")
+    }
+
+    test("the login item is not kept alive") {
+        // `KeepAlive` would restart `open` forever: it exits immediately by design, and launchd
+        // would relaunch it every five seconds for the life of the session.
+        let text = MenuBarLoginItem.plist(appPath: "/tmp/CodecBlue.app")
+        check(!text.contains("KeepAlive"))
+        check(text.contains("<key>RunAtLoad</key>"))
+    }
+}
+
+/// What the quality menu says, and why it says it.
+///
+/// Reported 2026-11-09: "I see the plugin showing many qualities, some of them without a name, and
+/// still High 990, and that does not add up". Three complaints in one sentence and all three were
+/// fair. The menu listed five rungs as if they were five equal choices, two of them as bare
+/// numbers with no explanation of why they exist, and the top one as "High · 990 kbps" on a link
+/// that could never carry it.
+func qualityMenuTests() {
+    test("the menu offers three levels, not five") {
+        // Asked 2026-11-09: "we said we would leave only HQ, SQ, LQ, and when the stream starts
+        // the kbps would appear beside them — why haven't you done it yet?" The two unnamed rungs
+        // each needed a sentence to explain where they sat, and a menu of five where two need
+        // explaining is a menu of three plus an argument.
+        let levels = QualityLevels.menuLevels(capacityKbps: 530, sampleRate: 48000)
+        check(levels.map(\.rung) == [0, 1, 4], "HQ, SQ, LQ: \(levels.map(\.rung))")
+        let labels = levels.map { QualityLevels.menuLabel($0, capacityKbps: 530) }
+        check(!labels.contains { $0.contains("between") }, "no positional filler: \(labels)")
+        // The unnamed rungs still exist for the adapter: it lands on 492 when a link carries
+        // ~450 kbps, and that is a decision the stream makes, not a preference.
+        check(
+            QualityLevels.describe(capacityKbps: 530, sampleRate: 48000).count == 5,
+            "the ladder is still five rungs")
+    }
+
+    test("a rung the link cannot carry says what it would give here, not just its nominal") {
+        let levels = QualityLevels.describe(capacityKbps: 530, sampleRate: 48000)
+        let hq = levels.first { $0.rung == 0 }!
+        let label = QualityLevels.menuLabel(hq, capacityKbps: 530)
+        // The nominal is *not* shown: it is what the rung asks for, and showing it next to a link
+        // that cannot carry it is the complaint being fixed. What is shown is the outcome.
+        check(!label.contains("990"), "the request must not be shown as the result: \(label)")
+        check(label.contains("396"), "the outcome is what matters: \(label)")
+        check(!label.contains("✓"), "a rung that does not fit is not the one chosen: \(label)")
+    }
+
+    test("with no measurement the menu claims nothing about fit") {
+        // Before a stream has reported its capacity the honest answer is silence: a menu that
+        // guesses "fits" is worse than one that says it does not know yet.
+        let levels = QualityLevels.describe(capacityKbps: 0, sampleRate: 48000)
+        for level in levels {
+            let label = QualityLevels.menuLabel(level, capacityKbps: 0)
+            check(!label.contains("here"), "no capacity, no claim: \(label)")
+            check(!label.contains("✓"), "no capacity, no tick: \(label)")
+        }
+    }
+
+    test("the ladder is five rungs and the two unnamed ones are between SQ and LQ") {
+        let levels = QualityLevels.describe(capacityKbps: 530, sampleRate: 48000)
+        check(levels.count == 5, "five rungs, not three: \(levels.count)")
+        check(levels.map { $0.rung } == [0, 1, 2, 3, 4])
+        // Bitrates must descend, or the menu reads as a mistake.
+        let kbps = levels.map { $0.nominalKbps }
+        check(kbps == kbps.sorted(by: >), "the ladder descends: \(kbps)")
+        check(kbps[2] > kbps[3], "492 is above 396")
+    }
+}
+
+/// The output that was taken over has to be given back, even if the process dies.
+///
+/// Measured 2026-11-09: `kill -9` mid-stream left CodecBlue as the system output with nothing
+/// feeding it. The device hid itself correctly and the Mac went silent — every app playing into a
+/// device that was not there. The restore lived in a `defer` in the process that died, which is
+/// the same mistake as the `feeding` flag: anything that must survive a crash cannot live only in
+/// a process.
+func outputRecoveryTests() {
+    test("what was taken over is written down, not just held in memory") {
+        let saved = DefaultOutput.Saved(uid: "BuiltInSpeakerDevice", name: "MacBook Pro Speakers")
+        DefaultOutput.remember(saved)
+        let read = DefaultOutput.remembered()
+        check(read?.uid == saved.uid, "the uid must survive: \(read?.uid ?? "nil")")
+        check(read?.name == saved.name, "the name must survive: \(read?.name ?? "nil")")
+        DefaultOutput.forget()
+        check(DefaultOutput.remembered() == nil, "forget must actually forget")
+    }
+
+    test("with no record there is nothing to recover, and nothing is said") {
+        // The common case: `stop` on a healthy machine must not print anything about outputs.
+        DefaultOutput.forget()
+        check(DefaultOutput.recoverIfOrphaned() == .nothingToDo)
+    }
+}
+
+/// The menu must not present the codec's bitrate as the link's capacity.
+///
+/// Reported 2026-11-09: "why do I still see high at 990 kbps?". Two separate causes, and both are
+/// worth a test because both are the same mistake in different clothes — a number that describes
+/// the request being read as a number that describes the outcome.
+func capacityHonestyTests() {
+    test("with no measurement the label claims nothing beyond the codec's own bitrate") {
+        let levels = QualityLevels.describe(capacityKbps: 0, sampleRate: 48000)
+        let hq = levels.first { $0.rung == 0 }!
+        let label = QualityLevels.menuLabel(hq, capacityKbps: 0)
+        check(label == "High", "no claim without a measurement: \(label)")
+        check(!label.contains("kbps"), "not even the codec's own number: \(label)")
+        check(!label.contains("gives"), "no outcome claimed: \(label)")
+        // An unnamed rung keeps its number even with no measurement, because the number *is* its
+        // name — it is not a claim about this link. Reported 2026-11-09, an hour after the
+        // names-only rule went in: "in the quality list I see two 'between Standard and Low' that
+        // do not make much sense to see". Two identical lines, because rungs 2 and 3 sit in the
+        // same place. The rule was right for the named rungs and wrong for these.
+        let unnamed = levels.first { $0.rung == 2 }!
+        let unnamedLabel = QualityLevels.menuLabel(unnamed, capacityKbps: 0)
+        check(unnamedLabel.hasPrefix("492"), "an unnamed rung is its number: \(unnamedLabel)")
+        let other = levels.first { $0.rung == 3 }!
+        let otherLabel = QualityLevels.menuLabel(other, capacityKbps: 0)
+        check(otherLabel.hasPrefix("396"), "the other one is 396: \(otherLabel)")
+        check(otherLabel != unnamedLabel, "and the two lines differ: \(otherLabel)")
+
+        // And once a stream is running, the numbers appear — that is the whole point of hiding
+        // them in the first place.
+        let streaming = QualityLevels.menuLabel(levels[0], capacityKbps: 0, streaming: true)
+        check(streaming == "High · 990 kbps", "numbers come back with a stream: \(streaming)")
+    }
+
+    test("a floor is not a ceiling: it must not decide what fits") {
+        // A stream paced to real time reports "kept up" on a link with any amount of spare room.
+        // Measured 2026-11-09: `link took 100% of real time` while carrying 336 kbps, which says
+        // nothing about whether 990 fits. `describe` is given the *ceiling* only, so a floor of
+        // 336 passed here would be a bug in the caller — this test pins the rule at the boundary.
+        let floor = QualityLevels.describe(capacityKbps: 336, sampleRate: 48000)
+        check(
+            floor.first { $0.rung == 0 }!.fits == false,
+            "336 as a capacity must not claim HQ fits")
+        // And the same number as a measured ceiling is a real limit, which is the other half: at
+        // 336 kbps nothing fits, because the bottom rung asks 330 and the fit test keeps 15%
+        // headroom — 330 needs 388 to be safe. That is not a bug, it is the rule that stops a
+        // level being chosen that would drop audio the moment anything else used the link.
+        check(
+            floor.filter(\.fits).isEmpty,
+            "336 leaves no rung with headroom: \(floor.filter(\.fits).map(\.rung))")
+        check(QualityLevels.nothingFits(capacityKbps: 336))
+    }
+}
+
+/// The ladder at 44.1 kHz, which is what makes a Low rung that is actually low possible.
+///
+/// Reported 2026-11-09: "make LQ lower, it is too close to the others — LQ should be around AAC,
+/// a bit above". At 48 kHz the five rungs are 990 / 660 / 492 / 396 / 330, so the bottom is 1.4×
+/// AAC's 234 kbps and the two unnamed rungs crowd it. At 44.1 kHz the same five EQMIDs come out
+/// lower, because the frame rate is lower, and the bottom lands near 303 — which is the "just
+/// above AAC" that was asked for, from the codec rather than from a table.
+///
+/// This test exists so the numbers are measured rather than assumed: if libldac ever changes them,
+/// the menu and the adapter must change with it.
+func ladderAtRatesTests() {
+    test("the ladder is lower at 44.1 kHz than at 48 kHz, and still five rungs") {
+        let at48 = LDACEncoder.ladder(sampleRate: 48000)
+        let at441 = LDACEncoder.ladder(sampleRate: 44100)
+        check(at48.count == 5, "five rungs at 48 kHz: \(at48)")
+        check(at441.count == 5, "five rungs at 44.1 kHz: \(at441)")
+        check(at441[4] < at48[4], "the bottom is lower at 44.1: \(at441[4]) vs \(at48[4])")
+        check(at441[0] < at48[0], "the top is lower at 44.1: \(at441[0]) vs \(at48[0])")
+        // The bottom rung must be the closest thing to AAC the codec has, and above it: AAC-LC
+        // VBR on this Mac measured 234 kbps, and a rung below that would be pointless.
+        check(at441[4] > 234, "still above AAC: \(at441[4])")
+        check(at441[4] < 340, "and close to it: \(at441[4])")
+        check(at48[4] == 330, "48 kHz bottom is 330: \(at48[4])")
+        check(at441[4] == 303, "44.1 kHz bottom is 303: \(at441[4])")
+    }
+}
+
+/// Prints both ladders, so the numbers in the menu can be checked against the codec.
+func ladderNumbersTests() {
+    test("the two ladders, as libldac reports them") {
+        let at48 = LDACEncoder.ladder(sampleRate: 48000)
+        let at441 = LDACEncoder.ladder(sampleRate: 44100)
+        print("      48 kHz: \(at48)")
+        print("    44.1 kHz: \(at441)")
+        check(at48.count == 5 && at441.count == 5)
+    }
+}
+
+/// The bottom of the ladder, at the rate that makes it low enough to be worth having.
+///
+/// Reported 2026-11-09: "make LQ lower, it is too close to the others — LQ should be around AAC, a
+/// bit above". It cannot be done by inventing a rung: libldac has five EQMIDs and no API for an
+/// arbitrary bitrate (`ldacBT.h` has `set_eqmid` and nothing like `set_bitrate`). What can be done
+/// is change the sample rate, because the bitrates are per frame and the frame rate follows it.
+///
+///     at 48 kHz:   990 / 660 / 492 / 396 / 330
+///     at 44.1 kHz: 909 / 606 / 452 / 363 / 303
+///
+/// 303 against AAC's measured 234 is "around AAC, a bit above" — from the codec, not from a table.
+func lowRungTests() {
+    test("44.1 kHz puts the bottom rung near AAC without going under it") {
+        let low = LDACEncoder.ladder(sampleRate: 44100).last!
+        check(low == 303, "measured, not assumed: \(low)")
+        check(low > 234, "AAC-LC VBR measured 234 kbps here; LDAC must stay above it")
+        // And the gap to the next rung stays wide enough to be a choice rather than a rounding
+        // error: 303 → 363 is 60 kbps, where 330 → 396 was 66. The complaint was that the bottom
+        // was too close to the middle rungs, and this is the number that answers it.
+        let next = LDACEncoder.ladder(sampleRate: 44100)[3]
+        check(next - low >= 55, "a real step, not a rounding: \(next) - \(low)")
+    }
+
+    test("the menu says what the sample rate does to the ladder, instead of staying silent") {
+        // The menu used to say nothing about the rate, on the grounds that a slogan about "native
+        // rate of most music" was false next to a tick on 48 kHz. Silence was worse: the reason to
+        // pick 44.1 is exactly this, and it was invisible.
+        let at48 = QualityLevels.describe(capacityKbps: 0, sampleRate: 48000)
+        let at441 = QualityLevels.describe(capacityKbps: 0, sampleRate: 44100)
+        check(at48.last!.nominalKbps == 330)
+        check(at441.last!.nominalKbps == 303)
+    }
+}
+
+/// The line the command line prints, which must follow the same rule as the menu.
+///
+/// Reported 2026-11-09: "instead of showing HQ 990 kbps — too much for this link, if you know the
+/// max is 336 show HQ with 336". The menu was fixed first and the command line was left printing
+/// the old shape — the same mistake in a second place, which is why this test exists: the two
+/// surfaces are one rule, and a rule that only holds in one of them is not a rule.
+func labelTests() {
+    test("a capped rung shows what it gives, not what it asks for") {
+        let levels = QualityLevels.describe(capacityKbps: 530, sampleRate: 48000)
+        let hq = QualityLevels.label(levels[0], capacityKbps: 530)
+        check(!hq.contains("990"), "the request is not the result: \(hq)")
+        check(hq.contains("396"), "the result is what is shown: \(hq)")
+        check(hq.contains("capped"), "and why: \(hq)")
+    }
+
+    test("a rung that fits says so, and the bottom says it is the bottom") {
+        let levels = QualityLevels.describe(capacityKbps: 530, sampleRate: 48000)
+        check(QualityLevels.label(levels[3], capacityKbps: 530).contains("fits"))
+        let tight = QualityLevels.describe(capacityKbps: 336, sampleRate: 48000)
+        check(QualityLevels.label(tight[4], capacityKbps: 336).contains("the lowest there is"))
+    }
+}
+
+/// Quit must stop the stream, and the two ways of quitting must agree.
+///
+/// Asked 2026-11-09: "can we make it so that when I quit it actually stops CodecBlue?" The rule is
+/// one line and the bug it replaces was two behaviours: the menu item stopped the stream and
+/// Cmd-Q did not, so the same word meant two things depending on how it was said. These tests pin
+/// the rule down where it can be checked without a headset: the delegate path and the button path
+/// call the same function.
+func quitTests() {
+    test("quitting and stopping are the same act") {
+        // The delegate answers `applicationShouldTerminate` with `quitWithoutTerminating`, and the
+        // button calls `quit`, which is that function plus `terminate`. If either stops calling
+        // `stop`, one of the two ways out leaves the headphones taken.
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        check(source?.contains("func quitWithoutTerminating") == true, "the shared half exists")
+        check(
+            source?.contains("guard isStreaming || LaunchAgent.isLoaded() else { return }") == true,
+            "and it stops whenever there is something to stop")
+    }
+
+    test("the label no longer promises that the music survives") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/CodecBlueMenuApp.swift", encoding: .utf8)
+        // The comments above the item quote the old labels on purpose, to explain why they are
+        // gone, so the check is on the button rather than on the file.
+        check(source?.contains("Button(\"Quit CodecBlue\")") == true, "Quit is just Quit")
+        check(
+            source?.contains("Button(\n            model.isStreaming") != true,
+            "no conditional suffix on the label")
+    }
+}
+
+/// A log line that contradicts itself is worse than no log line.
+///
+/// Measured 2026-11-09, in a real stream on a real link:
+///
+///     quality: LDAC HQ does not fit this link (611 kbps carried, 20% dropped): settled on 990
+///
+/// The level did not fit, and the number after "settled on" is that same level. `bitrateKbps`
+/// reads the last frame encoded, so right after `move(toRung:)` it still reports the rung we left.
+func staleBitrateTests() {
+    test("a rung's bitrate does not need a frame to be encoded") {
+        let ladder = LDACEncoder.cachedLadder(sampleRate: 48000)
+        check(
+            ladder == [990, 660, 492, 396, 330], "the ladder is what the encoder reports: \(ladder)"
+        )
+        for (rung, kbps) in ladder.enumerated() {
+            check(
+                LDACEncoder.nominalKbps(rung: rung, sampleRate: 48000) == kbps,
+                "rung \(rung) is \(kbps)")
+        }
+        check(LDACEncoder.nominalKbps(rung: 9, sampleRate: 48000) == nil, "no rung, no number")
+    }
+
+    test("the ladder follows the rate, so 44.1 kHz is not 48 kHz") {
+        let ladder = LDACEncoder.cachedLadder(sampleRate: 44100)
+        check(ladder == [909, 606, 452, 363, 303], "44.1 kHz ladder: \(ladder)")
+    }
+
+    test("a rung without a name is shown by its number, not by a nearby name") {
+        // Measured 2026-11-09: `codec 396 396 kbps` — the name of an unnamed rung is its bitrate,
+        // so a line that prints both says it twice. And `codec LQ 990 kbps` was worse: the name
+        // from the rung, the number from a frame encoded before the move.
+        check(LDACEncoder.name(rung: 2, sampleRate: 48000) == "492", "rung 2 is 492")
+        check(LDACEncoder.name(rung: 3, sampleRate: 48000) == "396", "rung 3 is 396")
+        check(LDACEncoder.nominalKbps(rung: 2, sampleRate: 48000) == 492, "name and rate agree")
+        check(LDACEncoder.name(rung: 0, sampleRate: 48000) == "HQ", "named rungs keep their name")
+    }
+
+    test("the settle line names the rung that fits, not the one that did not") {
+        // The rule, stated without a stream: the number after a move is the target's, and the
+        // target is what `fitRung` chose.
+        let fitted = BitrateAdapter.fitRung(capacityKbps: 611, sampleRate: 48000)
+        check(fitted > 0, "611 kbps cannot carry HQ, so the answer is below it: rung \(fitted)")
+        let named = LDACEncoder.nominalKbps(rung: fitted, sampleRate: 48000)
+        check(named != 990, "and the line cannot say 990 after abandoning 990: \(named ?? -1)")
+    }
+}
+
+/// The number beside a level is what that level is producing *now*.
+///
+/// Asked 2026-11-09: "we said we would leave only HQ, SQ, LQ, and when the stream starts the kbps
+/// would appear beside them". Beside the one that is playing, and the number is the measurement —
+/// HQ on a link that carries 396 is playing 396, not 990.
+func playingKbpsTests() {
+    test("the playing level shows its measured bitrate, the others show nothing") {
+        let levels = QualityLevels.menuLevels(capacityKbps: 0, sampleRate: 48000)
+        check(levels.count == 3, "three levels: \(levels.map(\.rung))")
+        let hq = levels[0]
+        let label = QualityLevels.menuLabel(
+            hq, capacityKbps: 0, streaming: true, playingKbps: 396)
+        check(label == "High · 396 kbps", "the measurement wins over the table: \(label)")
+        let quiet = QualityLevels.menuLabel(levels[1], capacityKbps: 0, streaming: true)
+        check(quiet == "Standard · 660 kbps", "a level that is not playing shows its own: \(quiet)")
+    }
+
+    test("no stream, no numbers, and no positional filler anywhere") {
+        let levels = QualityLevels.menuLevels(capacityKbps: 0, sampleRate: 48000)
+        let labels = levels.map { QualityLevels.menuLabel($0, capacityKbps: 0) }
+        check(labels == ["High", "Standard", "Low"], "\(labels)")
+        check(!labels.contains { $0.contains("between") }, "the filler is gone: \(labels)")
+    }
+}
+
+/// One pid field, more than one process that wants to feed it.
+///
+/// Measured 2026-11-09: a test run of `codecblue system` was killed by `timeout`, its `defer` wrote
+/// 0 into the shared ring, and the field had belonged to the launchd agent for twenty minutes. The
+/// agent kept streaming, the driver hid the device because nobody was feeding it, macOS fell back
+/// to the headphones — and `codecblue status` said `link_quality unknown`, `ring_frames 0`, battery
+/// 100%, which reads as "all fine".
+func feederOwnershipTests() {
+    test("leaving only lets go of a claim that is still ours") {
+        // The rule, without a stream: a process may clear the field only if it still holds it.
+        // Written as a check on the source because the ring is a shared mapping and a test that
+        // wrote to it would be a test that changes the running system.
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/SharedRing.swift", encoding: .utf8)
+        check(source?.contains("} else if feeder == me {") == true, "leaving is conditional")
+        check(source?.contains("!Self.isAlive(holder)") == true, "and claiming checks the holder")
+    }
+
+    test("a dead pid is not a live claim") {
+        // pid 1 exists, and a pid above the maximum cannot: the check the driver makes, made here.
+        check(SharedRing.isAlive(1), "pid 1 is init and always there")
+        check(!SharedRing.isAlive(0), "0 is not a pid")
+        check(!SharedRing.isAlive(999_999), "and neither is one that was never handed out")
     }
 }
