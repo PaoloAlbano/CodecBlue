@@ -1372,7 +1372,7 @@ func playSystem(_ address: String, options: [String]) async throws {
             try? await Task.sleep(for: .seconds(backoff))
             backoff = min(backoff * 2, 60)
             continue
-        } catch A2DPStreamer.StreamError.noLDAC(let offered) {
+        } catch A2DPStreamer.StreamError.noLDAC(let rawOffered) {
             // Not a failure to report and retry: a pair this program cannot drive, and a Mac that
             // can. Asked 2026-11-09: "when the headphones do not support LDAC, fall back to AAC on
             // the Mac". macOS has an AAC encoder and the AVDTP endpoint; writing a second codec
@@ -1383,10 +1383,12 @@ func playSystem(_ address: String, options: [String]) async throws {
             // point — an agent that stays alive would keep trying to take a link it cannot use.
             CodecFallback.record(
                 CodecFallback.Refusal(
-                    address: address, name: nameFor(address), offered: offered,
+                    address: address, name: nameFor(address),
+                    offered: CodecFallback.deduplicated(rawOffered),
                     measuredAt: Date()))
             log(
-                "these headphones offer no LDAC endpoint (they offer: \(offered.joined(separator: ", ")))"
+                "these headphones offer no LDAC endpoint (they offer: "
+                    + "\(CodecFallback.deduplicated(rawOffered).joined(separator: ", ")))"
             )
             if await CodecFallback.driveWithMacOS(address: address, log: log) != nil {
                 log("CodecBlue is not driving them: macOS is, in AAC or SBC, and you will hear it")
@@ -1966,7 +1968,8 @@ func codecRefusal(address: String) async -> CodecFallback.Refusal? {
     }
     guard !names.isEmpty, !hasLDAC else { return nil }
     return CodecFallback.Refusal(
-        address: address, name: nameFor(address), offered: names, measuredAt: Date())
+        address: address, name: nameFor(address), offered: CodecFallback.deduplicated(names),
+        measuredAt: Date())
 }
 
 /// The name macOS shows for a pair, or the address when it is not in the list.

@@ -170,11 +170,14 @@ final class AppModel: ObservableObject {
     func codecNote(for device: BluetoothHeadphone) -> String {
         guard device.isConnected else { return "" }
         if let refusal = CodecFallback.refusal(for: device.address) {
-            // "AAC" is what macOS will negotiate for almost every pair; naming the codecs the pair
-            // actually offered is more honest than naming one, and it is what the log says.
+            // The codecs the pair actually offered, in the order it offered them, each once.
+            // `offered` is already deduplicated where it is written (a pair publishes two sinks per
+            // codec, so the raw answer is `SBC, SBC, AAC, AAC`); the `Set` here is a second guard,
+            // because a refusal written by an older build may still carry the duplicates.
             let offered = refusal.offered.filter { $0 == "AAC" || $0 == "SBC" }
-            let what =
-                offered.isEmpty ? "SBC/AAC" : Array(Set(offered)).sorted().joined(separator: "/")
+            var seen: Set<String> = []
+            let unique = offered.filter { seen.insert($0).inserted }
+            let what = unique.isEmpty ? "SBC/AAC" : unique.joined(separator: "/")
             return " · \(what) via macOS"
         }
         if isStreaming, device.address == selectedAddress { return " · LDAC" }

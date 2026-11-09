@@ -28,6 +28,11 @@ public enum CodecFallback {
         public var address: String
         public var name: String
         /// The codecs the pair actually offered, as AVDTP names them: "SBC", "AAC".
+        /// The codecs the pair offered, deduplicated and in a stable order.
+        ///
+        /// A pair publishes two sinks per codec — one for music, one for voice — so the raw
+        /// DISCOVER answer is `SBC, SBC, AAC, AAC`. That is four endpoints and two codecs, and a
+        /// person reading a list needs the second number. See `AVDTP.Codec`.
         public var offered: [String]
         public var measuredAt: Date
 
@@ -43,6 +48,17 @@ public enum CodecFallback {
         }
     }
 
+    /// The codecs a pair offers, each named once, in the order it offered them.
+    ///
+    /// A pair publishes two sinks per codec — one for music, one for voice — so the raw DISCOVER
+    /// answer is `SBC, SBC, AAC, AAC`: four endpoints, two codecs. The streamer does not care (it
+    /// takes the first LDAC endpoint and ignores the rest), but a list shown to a person does, and
+    /// a duplicate in it reads as a bug in the program rather than a fact about the headphones.
+    public static func deduplicated(_ names: [String]) -> [String] {
+        var seen: Set<String> = []
+        return names.filter { seen.insert($0).inserted }
+    }
+
     static var storeURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/CodecBlue/refusals.json")
@@ -51,8 +67,15 @@ public enum CodecFallback {
     /// Every refusal on record, keyed by address.
     public static func all() -> [String: Refusal] {
         guard let data = try? Data(contentsOf: storeURL),
-            let records = try? JSONDecoder().decode([String: Refusal].self, from: data)
+            var records = try? JSONDecoder().decode([String: Refusal].self, from: data)
         else { return [:] }
+        // Normalised on read, not only on write: a record written by a build that did not
+        // deduplicate is still on disk, and the fix has to reach it too. Measured 2026-11-09: the
+        // file held `SBC, SBC, AAC, AAC` after the writer had been fixed, so a reader that trusted
+        // it would keep showing the duplicates until the pair was measured again.
+        for (key, refusal) in records {
+            records[key]?.offered = deduplicated(refusal.offered)
+        }
         return records
     }
 
@@ -96,17 +119,16 @@ public enum CodecFallback {
     ) async -> String? {
         // Ask bluetoothd to bring its own profiles back. `connect` is idempotent: on a link that is
         // already up it does nothing, which is the common case here.
-        if let session = try? await ClassicXPCSession(label: "fallback") {
-            do {
-                try await session.start()
-                if let device = try? await session.lookup(address: address).uuid {
-                    session.connect(device)
-                }
-            } catch {
-                log("fallback: could not ask macOS to reconnect (\(error)); trying anyway")
+        let session = ClassicXPCSession(label: "fallback")
+        do {
+            try await session.start()
+            if let device = try? await session.lookup(address: address).uuid {
+                session.connect(device)
             }
-            session.invalidate()
+        } catch {
+            log("fallback: could not ask macOS to reconnect (\(error)); trying anyway")
         }
+        session.invalidate()
 
         // Wait for coreaudiod to publish the pair's output device. It appears when macOS's own
         // AVDTP channel is up, which is what the reconnect above is for.

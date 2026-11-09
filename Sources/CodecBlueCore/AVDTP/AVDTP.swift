@@ -90,6 +90,19 @@ public enum AVDTP {
 
     /// A media codec capability (service category 7).
     public struct Codec: Sendable, Equatable, CustomStringConvertible {
+        // The duplicates in an offered-codec list are real, and they are not a bug in the parser.
+        //
+        // Reported 2026-11-09: "why does offered have SBC, SBC, AAC, AAC?" Because a pair of
+        // headphones publishes *two* sinks per codec — one for music and one for voice — and
+        // DISCOVER returns every endpoint on the device. Measured on FreeBuds 3, the raw endpoints
+        // are SEID 1/2 (SBC), 3/4 (AAC): four sinks, two codecs. The streamer picks the first
+        // LDAC endpoint and ignores the rest, so the duplication never mattered there; it only
+        // became visible when the list started being shown to a person.
+        //
+        // Deduplicated at the point where it is shown, not at the point where it is parsed: the
+        // endpoint list is also what `setUp` walks to find SEIDs, and collapsing it there would
+        // make the program choose an endpoint it had already decided not to look at.
+
         public let mediaCodecType: UInt8  // 0 SBC, 2 AAC, 0xFF vendor specific
         public let information: Data  // codec-specific bytes after the codec type
 

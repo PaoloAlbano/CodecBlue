@@ -3028,3 +3028,47 @@ func codecFallbackTests() {
         check(!body.contains("AudioConverter"), "no AAC encoder was written for this")
     }
 }
+
+/// Two sinks per codec is a fact about headphones, not a bug in the parser.
+///
+/// Reported 2026-11-09: "why does offered have SBC, SBC, AAC, AAC?" Because a pair publishes *two*
+/// sinks per codec — one for music, one for voice — and DISCOVER returns every endpoint on the
+/// device. Measured on FreeBuds 3: SEID 1/2 (SBC), 3/4 (AAC). Four sinks, two codecs.
+func duplicateCodecTests() {
+    test("the list shown to a person names each codec once") {
+        check(
+            CodecFallback.deduplicated(["SBC", "SBC", "AAC", "AAC"]) == ["SBC", "AAC"],
+            "four endpoints, two codecs")
+        check(CodecFallback.deduplicated([]) == [], "nothing stays nothing")
+        check(
+            CodecFallback.deduplicated(["LDAC", "SBC", "AAC"]) == ["LDAC", "SBC", "AAC"],
+            "and the order the pair offered them is kept")
+    }
+
+    test("a record written by an older build is normalised on read") {
+        // The fix has to reach what is already on disk: measured 2026-11-09, the file still held
+        // `SBC, SBC, AAC, AAC` after the writer had been fixed, so a reader that trusted it would
+        // keep showing the duplicates until the pair happened to be measured again.
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/CodecFallback.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let all = body.range(of: "public static func all()"),
+            let read = body.range(of: "public static func refusal(for")
+        else {
+            check(false, "`all` and `refusal(for:)` must exist")
+            return
+        }
+        let block = String(body[all.lowerBound..<read.lowerBound])
+        check(block.contains("deduplicated(refusal.offered)"), "normalised where it is read")
+    }
+
+    test("the parser still returns every endpoint, because setUp walks it for SEIDs") {
+        // Collapsing the endpoint list would make the program choose an endpoint it had already
+        // decided not to look at: the SEID of the second SBC sink is not the SEID of the first.
+        let payload = Data([0x04, 0x08, 0x08, 0x08, 0x0C, 0x08, 0x10, 0x08])
+        let endpoints = AVDTP.parseDiscover(payload)
+        check(endpoints.count == 4, "four endpoints: \(endpoints.count)")
+        check(endpoints.map(\.seid) == [1, 2, 3, 4], "with four distinct SEIDs")
+        check(endpoints.allSatisfy(\.isSink), "all sinks")
+    }
+}
