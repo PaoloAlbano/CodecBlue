@@ -499,6 +499,12 @@ func playSystemOnce(
     let ringForFeeding = try? SharedRing()
     ringForFeeding?.feeding = true
     defer { ringForFeeding?.feeding = false }
+    // Nothing to take over if the headphones are not there, and the attempt is not free: it
+    // changes the system output twice, and it is retried every five seconds by launchd. Measured
+    // 2026-11-09: 21 takeovers and 12 restores in one log, with the headphones in their case.
+    if await !isReachable(address) {
+        throw TakeoverError.headphonesDidNotConnect
+    }
     let previousOutput = DefaultOutput.takeOver()
     if let previousOutput {
         log("system output: CodecBlue (was \(previousOutput.name))")
@@ -522,6 +528,28 @@ func playSystemOnce(
         DefaultOutput.forget()
     }
     return interruptedByCall
+}
+
+/// Whether bluetoothd says the headphones have a link right now.
+///
+/// Asked before touching the system output, because a takeover is not free: it changes the Mac's
+/// output twice and is retried every few seconds while the headphones are away. Measured
+/// 2026-11-09, headphones in their case: 21 takeovers and 12 restores in one log, and nine
+/// attempts left CodecBlue selected with nothing feeding it — a silent Mac. A question to
+/// bluetoothd costs a few milliseconds and answers the only thing that matters here.
+///
+/// `true` when the question cannot be asked: an XPC failure is not evidence that the headphones
+/// are absent, and refusing to stream because a probe failed would be worse than trying.
+func isReachable(_ address: String) async -> Bool {
+    let session = ClassicXPCSession(label: "reachable")
+    do {
+        try await session.start()
+    } catch {
+        return true
+    }
+    defer { session.invalidate() }
+    guard let record = try? await session.lookup(address: address) else { return true }
+    return record.isLinkUp
 }
 
 /// One streaming session, without touching the system output: see `playSystemOnce`.
@@ -1291,9 +1319,36 @@ func playSystem(_ address: String, options: [String]) async throws {
         monitor?.start()
     }
     defer { monitor?.stop() }
+    // A headset that is not there is not a reason to die, and it is certainly not a reason to die
+    // four thousand times an hour.
+    //
+    // Measured 2026-11-09, with the headphones in their case: launchd restarted the agent 4331
+    // times, 4207 of them ending in "the headphones did not connect". `KeepAlive` plus
+    // `ThrottleInterval 5` is a five-second retry loop with no ceiling, and every attempt takes the
+    // system output and gives it back — so the Mac's audio device changed hands thousands of times
+    // while the headphones sat in a drawer, and nine of those attempts left CodecBlue selected with
+    // nothing feeding it, which is a silent Mac.
+    //
+    // The fix is to wait *inside* the process instead of exiting and letting launchd do the
+    // waiting: the backoff grows to a minute, the log says what it is waiting for once per attempt
+    // instead of once per second, and the process stays alive so launchd has nothing to restart.
+    var backoff: TimeInterval = 5
     while true {
-        let interruptedByCall = try await playSystemOnce(
-            address, options: options, monitor: monitor, stopRequest: stopRequest)
+        let interruptedByCall: Bool
+        do {
+            interruptedByCall = try await playSystemOnce(
+                address, options: options, monitor: monitor, stopRequest: stopRequest)
+        } catch TakeoverError.headphonesDidNotConnect {
+            log(
+                String(
+                    format: "the headphones are not reachable; retrying in %.0f s "
+                        + "(they are off, out of range, or in their case)",
+                    backoff))
+            try? await Task.sleep(for: .seconds(backoff))
+            backoff = min(backoff * 2, 60)
+            continue
+        }
+        backoff = 5
         guard interruptedByCall else { break }
         // A Ctrl-C during the call's gap stops the process, not just the session: there is nothing
         // left to come back to.

@@ -2792,3 +2792,33 @@ func feederOwnershipTests() {
         check(!SharedRing.isAlive(999_999), "and neither is one that was never handed out")
     }
 }
+
+/// A headset in its case must not cost the Mac its audio device, four thousand times.
+///
+/// Measured 2026-11-09: launchd restarted the agent 4331 times while the headphones were in their
+/// case, 4207 of them ending in "the headphones did not connect" — `KeepAlive` plus
+/// `ThrottleInterval 5` is a retry loop with no ceiling. And because the takeover happened before
+/// the connection was attempted, 21 of those attempts took the system output and only 12 gave it
+/// back: nine times the Mac was left pointing at a device with nothing feeding it, which is silence
+/// with no error anywhere.
+func absentHeadsetTests() {
+    test("the output is not touched before the headphones are known to be there") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let reachable = body.range(of: "if await !isReachable(address)"),
+            let takeover = body.range(of: "let previousOutput = DefaultOutput.takeOver()")
+        else {
+            check(false, "both the check and the takeover must exist")
+            return
+        }
+        check(reachable.lowerBound < takeover.lowerBound, "the question comes first")
+    }
+
+    test("waiting happens in the process, not by dying and being restarted") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("catch TakeoverError.headphonesDidNotConnect"), "the case is handled")
+        check(body.contains("backoff = min(backoff * 2, 60)"), "and the wait grows")
+        check(body.contains("backoff = 5"), "and resets after a session that worked")
+    }
+}
