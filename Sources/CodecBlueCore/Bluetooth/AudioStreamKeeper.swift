@@ -45,6 +45,8 @@ public final class AudioStreamKeeper: @unchecked Sendable {
     private static let fastBurst = 30
     private let log: (String) -> Void
     private var task: Task<Void, Never>?
+    /// The `log stream` process, kept so `stop()` can end it instead of leaving it running.
+    private var follower: Process?
     /// Set once bluetoothd is seen holding the audio device again.
     ///
     /// Guarded by a lock because it is written on the watcher's task and read from the status of a
@@ -108,13 +110,13 @@ public final class AudioStreamKeeper: @unchecked Sendable {
             // on before the takeover. Everything after it is the *confirmation*, and the
             // confirmation is not on the path that makes the audio work.
             //
-            // Measured 2026-11-08: `deviceIsRegistered()` shells out to `log show`, which costs
-            // 1.1 s on this Mac whatever the window (`--last 30s` and `--last 30m` are the same
-            // 1.1 s: the price is the process and the archive, not the lines). With the check on
-            // every attempt the keeper loop ran at 1.9 s instead of the 1 s it asks for, and each
-            // turn spent most of its life blocked in a pipe, while the audio thread was the one
-            // that needed the CPU. So the check runs on its own task, at its own slower pace, and
-            // the sending never waits for it.
+            // Measured 2026-11-08 and again 2026-11-09: asking the archive costs 0.8–1.1 s on this
+            // Mac whatever the window (`--last 30s` and `--last 30m` are the same price: it is the
+            // process and the archive, not the lines). With the check on every attempt the keeper
+            // loop ran at 1.9 s instead of the 1 s it asks for, and each turn spent most of its
+            // life blocked in a pipe while the audio thread was the one that needed the CPU. So the
+            // check runs on its own task and the sending never waits for it — and since 2026-11-09
+            // it does not poll at all: it follows the log. See `watchRegistration`.
             self.sendStartAudio()
             self.noteAttempt()
             // The first burst: the takeover is about to erase bluetoothd's device, and the window
@@ -218,77 +220,133 @@ public final class AudioStreamKeeper: @unchecked Sendable {
         return true
     }
 
-    /// Watches bluetoothd's log for the audio device, at the pace the log can afford.
+    /// Watches bluetoothd's log for the audio device, by *following* it instead of re-reading it.
     ///
-    /// Repeating the message is the mechanism, not a workaround: the takeover makes bluetoothd
-    /// unpublish its audio device for the headphones (`Closing media channel` → `Erased … -tacl`),
-    /// and it republishes it about 14 s later. Until it does, every message is answered
-    /// `No device found for uid` and does nothing — so the only way to be sure the link quality
-    /// mode is on is to keep asking and to *notice when the answer changes*.
+    /// The previous version ran `log show --last 2m` every two seconds. Two things were wrong with
+    /// that, and the second one is the bug this replaces:
     ///
-    /// Re-checking on every attempt was the previous version, and it made the keeper slower than
-    /// the thing it was watching. It also confirmed only once, so when bluetoothd erased the
-    /// device again — which it does whenever the media channel is reopened, and it happened seven
-    /// times in one 45 s session — the keeper kept sending into nothing and the link fell back to
-    /// `at most 3 packet(s) per drain` for the ~14 s it takes bluetoothd to republish.
+    /// * It cost 0.8 s of a shell-out per call (measured 2026-11-09, five runs, 0.79–0.86 s), on a
+    ///   two-second period: **40% of a core for the whole life of every stream**, spent in a pipe
+    ///   while the audio thread needed the CPU. The first version of this comment already knew
+    ///   that and moved the check off the sending path; it did not ask whether the check needed to
+    ///   exist at all.
+    /// * A two-minute sliding window forgets. bluetoothd registers the audio device once, when the
+    ///   headphones connect, and then says nothing for as long as the stream runs. Two minutes
+    ///   later the window is empty, `hasRegisteredDevice` finds no line and returns false, and the
+    ///   keeper concludes the device is gone — while nothing has happened. Measured 2026-11-09:
+    ///   the 2-minute window contained **zero** `Register`/`Erased` lines, the 60-minute window
+    ///   contained 48. So the answer flipped from true to false purely with the passage of time,
+    ///   which is why the link quality mode looked like it kept being lost.
+    ///
+    /// `log stream` is the right instrument: it delivers the lines as they are written, so there is
+    /// no window to slide and no polling to pay for. The state is seeded once from the archive
+    /// (one `log show`, once per stream) and then updated by events.
     private func watchRegistration() {
+        // Seed from the archive: the registration may be hours old, and the stream would otherwise
+        // start out not knowing. One call, once, off the audio path.
+        let seeded = Self.hasRegisteredDevice(archiveLog(), uid: uid)
+        stateLock.lock()
+        confirmed = seeded
+        checked = true
+        if !seeded { idleTurns += 1 }
+        stateLock.unlock()
+        if seeded { log("link quality mode: bluetoothd already has the audio device") }
+
+        // Then follow. A stream that dies is restarted: it is the only source of truth about a
+        // device bluetoothd creates and destroys, and a silent watcher would be worse than a slow
+        // one.
         while !Task.isCancelled {
-            let registered = self.deviceIsRegistered()
-            stateLock.lock()
-            let changed = registered != confirmed
-            confirmed = registered
-            checked = true
-            let count = attempts
-            idleTurns = registered ? 0 : idleTurns + 1
-            stateLock.unlock()
-            if changed {
-                if registered {
-                    self.log(
-                        "link quality mode on: bluetoothd has the audio device again "
-                            + "after \(count) attempt(s)")
-                } else {
-                    // Not "lost": bluetoothd erases its *audio device* whenever the media channel
-                    // is reopened, and with the stream running it may never republish it — while
-                    // the link quality mode, which is a setting on the ACL connection, stays on.
-                    // Measured 2026-11-08: erased at 19:18:10 and never back, with the stream at
-                    // 336 kbps and 62 packets/s and no stall at all. Saying "lost" there accused
-                    // the link of a fault it did not have, which is the same mistake the
-                    // `link_quality` field made before it was read from the socket.
-                    self.log(
-                        "link quality mode: bluetoothd erased its audio device (it does that "
-                            + "when the media channel is reopened); still asking, slowly, in case "
-                            + "it comes back")
-                }
-            }
-            // A registration is a rare event and the log is read from an archive: two seconds is
-            // already finer than the 14 s it takes bluetoothd to republish.
-            Thread.sleep(forTimeInterval: max(2, self.period))
+            followLog()
+            guard !Task.isCancelled else { break }
+            log("link quality mode: the log follower stopped; restarting it")
+            Thread.sleep(forTimeInterval: 2)
         }
     }
 
-    /// Whether bluetoothd currently has an audio device for these headphones. Read from its own
-    /// log, which is the only place that says so: the device is created and destroyed there.
-    private func deviceIsRegistered() -> Bool {
+    /// Runs `log stream` and updates the state from each line, until cancelled or the process dies.
+    private func followLog() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/log")
         process.arguments = [
-            // Two minutes, not thirty seconds: the device is registered once when the headphones
-            // connect, and that line can be long past by the time we start. A short window found
-            // nothing and the keeper never confirmed — while the link quality mode was in fact
-            // on, which is worse than not reporting at all. Five minutes was the previous value
-            // and costs the same as thirty seconds; two is enough for a device that has just been
-            // connected and cheaper to read.
-            "show", "--last", "2m", "--predicate", "process == \"bluetoothd\"",
+            "stream", "--predicate", "process == \"bluetoothd\"", "--style", "compact",
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return }
+        follower = process
+        defer {
+            process.terminate()
+            follower = nil
+        }
+        let handle = pipe.fileHandleForReading
+        var buffer = Data()
+        while !Task.isCancelled {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            // Whole lines only: a chunk can end in the middle of one, and half a line that happens
+            // to contain "Erased" would be read as an erase.
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                let lineData = buffer[buffer.startIndex..<newline]
+                buffer.removeSubrange(buffer.startIndex...newline)
+                guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                apply(line)
+            }
+        }
+    }
+
+    /// Applies one log line to the state, and reports a change.
+    private func apply(_ line: String) {
+        stateLock.lock()
+        var registered = confirmed
+        stateLock.unlock()
+        let before = registered
+        Self.apply(line, uid: uid, to: &registered)
+        guard registered != before else { return }
+        stateLock.lock()
+        confirmed = registered
+        checked = true
+        let count = attempts
+        idleTurns = registered ? 0 : idleTurns + 1
+        stateLock.unlock()
+        if registered {
+            log(
+                "link quality mode on: bluetoothd has the audio device again "
+                    + "after \(count) attempt(s)")
+        } else {
+            // Not "lost": bluetoothd erases its *audio device* whenever the media channel is
+            // reopened, and with the stream running it may never republish it — while the link
+            // quality mode, which is a setting on the ACL connection, stays on. Measured
+            // 2026-11-08: erased at 19:18:10 and never back, with the stream at 336 kbps and 62
+            // packets/s and no stall at all. Saying "lost" there accused the link of a fault it
+            // did not have, which is the same mistake the `link_quality` field made before it was
+            // read from the socket.
+            log(
+                "link quality mode: bluetoothd erased its audio device (it does that when the "
+                    + "media channel is reopened); still asking, slowly, in case it comes back")
+        }
+    }
+
+    /// One `log show` over a window wide enough to contain a registration that happened hours ago.
+    ///
+    /// Thirty minutes, not two: the device is registered once when the headphones connect and the
+    /// keeper can start long after that. The cost is paid once per stream, not once per two
+    /// seconds, which is what makes a wide window affordable.
+    private func archiveLog() -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/log")
+        process.arguments = [
+            "show", "--last", "30m", "--predicate", "process == \"bluetoothd\"",
             "--style", "compact",
         ]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return false }
+        do { try process.run() } catch { return "" }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard let text = String(data: data, encoding: .utf8) else { return false }
-        return Self.hasRegisteredDevice(text, uid: uid)
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     /// The rule, exposed for the self-test: the last thing bluetoothd said about our uid decides.
@@ -299,21 +357,34 @@ public final class AudioStreamKeeper: @unchecked Sendable {
     /// pair of headphones, and a device that reports a different one would otherwise never be
     /// seen as registered.
     public static func hasRegisteredDevice(_ log: String, uid: String) -> Bool {
-        // The address is the part before the transport suffix: `40:DC:A5:0E:14:48-tacl`. Split
-        // on the suffix separator, not on `-`, because the address is full of hyphens in the
-        // dashed CoreAudio spelling and splitting on those would cut it in half.
-        let address = uid.components(separatedBy: "-t").first ?? uid
         var registered = false
-        for line in log.split(separator: "\n") where line.contains(address) {
-            if line.contains("Register audio device") { registered = true }
-            if line.contains("Erased") && line.contains("audio device") { registered = false }
+        for line in log.split(separator: "\n") {
+            apply(String(line), uid: uid, to: &registered)
         }
         return registered
+    }
+
+    /// The same rule, one line at a time, so that a *followed* log and a *re-read* one cannot
+    /// disagree. The follower needs it per line; the seed needs it over a whole archive.
+    ///
+    /// Matched on the address, not on `uid`: the suffix is not guaranteed to be `-tacl` for every
+    /// pair of headphones, and a device that reports a different one would otherwise never be seen
+    /// as registered. The address is the part before the transport suffix, split on `-t` and not
+    /// on `-`, because the address is full of hyphens in the dashed CoreAudio spelling.
+    public static func apply(_ line: String, uid: String, to registered: inout Bool) {
+        let address = uid.components(separatedBy: "-t").first ?? uid
+        guard line.contains(address) else { return }
+        if line.contains("Register audio device") { registered = true }
+        if line.contains("Erased") && line.contains("audio device") { registered = false }
     }
 
     public func stop() {
         task?.cancel()
         task = nil
+        // The follower is a child process reading a pipe: cancelling the task does not end it, and
+        // a `log stream` left behind would keep a core busy for as long as the Mac is on.
+        follower?.terminate()
+        follower = nil
     }
 
     deinit { task?.cancel() }

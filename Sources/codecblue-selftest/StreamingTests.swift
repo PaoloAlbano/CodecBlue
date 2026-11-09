@@ -2822,3 +2822,61 @@ func absentHeadsetTests() {
         check(body.contains("backoff = 5"), "and resets after a session that worked")
     }
 }
+
+/// The keeper must not forget what it knew, and must not pay a shell-out to remember it.
+///
+/// Measured 2026-11-09, the bug behind "the link quality mode keeps being lost": the keeper asked
+/// `log show --last 2m` every two seconds. bluetoothd registers the audio device once, when the
+/// headphones connect, and then says nothing for as long as the stream runs — so two minutes later
+/// the window was empty, `hasRegisteredDevice` found no line and returned false, and the keeper
+/// concluded the device had gone while nothing had happened. Measured: the 2-minute window held
+/// **zero** `Register`/`Erased` lines, the 60-minute window held 48.
+///
+/// The same call cost 0.79–0.86 s (five runs) on a two-second period: 40% of a core, for the whole
+/// life of every stream, in a pipe while the audio thread needed the CPU.
+func keeperWindowTests() {
+    test("an empty window means nothing, and must not be read as an erase") {
+        // The rule, stated as the bug: no lines is not evidence of absence.
+        check(!AudioStreamKeeper.hasRegisteredDevice("", uid: "40:DC:A5:0E:14:48-tacl"))
+        // And one line of noise is still not an erase.
+        let noise = "2026-11-09 19:09:14.507 Df bluetoothd[33429:3480c0f] [Server.Core] Le [0x43]"
+        check(!AudioStreamKeeper.hasRegisteredDevice(noise, uid: "40:DC:A5:0E:14:48-tacl"))
+    }
+
+    test("a registration older than any window still counts, if the window is wide enough") {
+        // The seed reads 30 minutes, not 2: the registration happens when the headphones connect
+        // and the keeper can start long after that.
+        let old = """
+            2026-11-09 18:50:18.891 Df bluetoothd[33429:3462c44] [com.apple.bluetooth:Server.Audio] \
+            -[AudioDeviceManager publishAndRegisterDeviceForUID:withArgs:device:] \
+            Register audio device 40:DC:A5:0E:14:48-tacl
+            """
+        check(AudioStreamKeeper.hasRegisteredDevice(old, uid: "40:DC:A5:0E:14:48-tacl"))
+    }
+
+    test("per-line and whole-log agree, because a followed log and a re-read one must not differ") {
+        let lines = [
+            "Register audio device 40:DC:A5:0E:14:48-tacl",
+            "Erased 1 audio device 40:DC:A5:0E:14:48-tacl from audio device map",
+            "Register audio device 40:DC:A5:0E:14:48-tacl",
+        ]
+        var perLine = false
+        for line in lines {
+            AudioStreamKeeper.apply(line, uid: "40:DC:A5:0E:14:48-tacl", to: &perLine)
+        }
+        let whole = AudioStreamKeeper.hasRegisteredDevice(
+            lines.joined(separator: "\n"), uid: "40:DC:A5:0E:14:48-tacl")
+        check(perLine == whole, "same answer both ways: per-line \(perLine), whole \(whole)")
+        check(perLine, "and the answer is 'registered', because the last word wins")
+    }
+
+    test("the follower is ended when the keeper stops") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Bluetooth/AudioStreamKeeper.swift",
+            encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("follower?.terminate()"), "a log stream left behind costs a core")
+        check(!body.contains("--last \"2m\""), "the sliding window is gone")
+        check(body.contains("\"show\", \"--last\", \"30m\""), "the seed is wide enough")
+    }
+}
