@@ -2970,7 +2970,7 @@ func failedStartTests() {
     test("start refuses before writing a login item it cannot honour") {
         let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
         let body = source ?? ""
-        guard let refusal = body.range(of: "if let reason = await codecRefusal(address: chosen)"),
+        guard let refusal = body.range(of: "if let refusal = await codecRefusal(address: chosen)"),
             let install = body.range(
                 of: "try LaunchAgent.install(address: chosen, arguments: options)")
         else {
@@ -2979,7 +2979,52 @@ func failedStartTests() {
         }
         check(refusal.lowerBound < install.lowerBound, "the check comes first")
         check(
-            body.contains("nothing was started, and nothing was written"),
+            body.contains("nothing was written: no login item was created"),
             "and it says so")
+    }
+}
+
+/// A pair this program cannot drive must still make a sound.
+///
+/// Asked 2026-11-09: "so when the headphones do not support LDAC, fall back to AAC on the Mac".
+/// The alternative — and what happened before — was the link taken, macOS forced off it, an error,
+/// and a Mac with no audio at all: strictly worse than not having pressed the button.
+///
+/// The fallback is not an AAC encoder written here. macOS has one, it has the AVDTP endpoint and it
+/// is already paired, so the fallback is to step aside and let it play.
+func codecFallbackTests() {
+    test("a refusal is remembered, so the menu can say it without paying for the link") {
+        // Measuring costs the link: the only way to learn which codecs a pair offers is to open an
+        // AVDTP channel, which forces macOS off the headphones for a second. Once, when someone
+        // presses Start, is acceptable. Every two seconds to decorate a menu is not.
+        let refusal = CodecFallback.Refusal(
+            address: "AA:BB:CC:DD:EE:FF", name: "Test Buds", offered: ["SBC", "AAC"],
+            measuredAt: Date())
+        CodecFallback.record(refusal)
+        defer { CodecFallback.clear(address: "AA:BB:CC:DD:EE:FF") }
+        let read = CodecFallback.refusal(for: "AA:BB:CC:DD:EE:FF")
+        check(read?.offered == ["SBC", "AAC"], "the offered codecs survive the round trip")
+        check(read?.name == "Test Buds", "and so does the name")
+        // The address is matched case-insensitively: the same pair is spelled both ways by
+        // different parts of the system.
+        check(CodecFallback.refusal(for: "aa:bb:cc:dd:ee:ff") != nil, "case does not matter")
+    }
+
+    test("a pair that offers LDAC again is forgotten, not hidden behind a stale label") {
+        CodecFallback.record(
+            CodecFallback.Refusal(
+                address: "11:22:33:44:55:66", name: "Fixed Buds", offered: ["AAC"],
+                measuredAt: Date()))
+        CodecFallback.clear(address: "11:22:33:44:55:66")
+        check(CodecFallback.refusal(for: "11:22:33:44:55:66") == nil, "the memory is gone")
+    }
+
+    test("the fallback hands the pair to macOS instead of encoding AAC here") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/CodecFallback.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("driveWithMacOS"), "there is a hand-off")
+        check(body.contains("DefaultOutput.set(device)"), "and it selects the headphones")
+        check(!body.contains("AudioConverter"), "no AAC encoder was written for this")
     }
 }

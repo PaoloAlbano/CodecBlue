@@ -1372,6 +1372,31 @@ func playSystem(_ address: String, options: [String]) async throws {
             try? await Task.sleep(for: .seconds(backoff))
             backoff = min(backoff * 2, 60)
             continue
+        } catch A2DPStreamer.StreamError.noLDAC(let offered) {
+            // Not a failure to report and retry: a pair this program cannot drive, and a Mac that
+            // can. Asked 2026-11-09: "when the headphones do not support LDAC, fall back to AAC on
+            // the Mac". macOS has an AAC encoder and the AVDTP endpoint; writing a second codec
+            // here to duplicate it would be a second set of bugs for a worse result.
+            //
+            // So: remember the refusal (so the menu can say it without paying for the link again),
+            // hand the headphones back, make them the system output, and stop. Exiting is the
+            // point — an agent that stays alive would keep trying to take a link it cannot use.
+            CodecFallback.record(
+                CodecFallback.Refusal(
+                    address: address, name: nameFor(address), offered: offered,
+                    measuredAt: Date()))
+            log(
+                "these headphones offer no LDAC endpoint (they offer: \(offered.joined(separator: ", ")))"
+            )
+            if await CodecFallback.driveWithMacOS(address: address, log: log) != nil {
+                log("CodecBlue is not driving them: macOS is, in AAC or SBC, and you will hear it")
+                log("to try LDAC again, enable it in the headphones' own app and run start again")
+                exit(0)
+            }
+            log(
+                "and macOS did not take them either — check that they are connected in "
+                    + "System Settings > Bluetooth")
+            exit(1)
         } catch let error as A2DPStreamer.StreamError {
             // Every other failure used to fall through and kill the process, and `KeepAlive`
             // turned that into a retry loop with no ceiling: measured 2026-11-09, the headphones
@@ -1883,9 +1908,21 @@ func start(_ arguments: [String]) async throws {
     // it: `setUp` still refuses, because the answer can change between here and there (a pair can
     // be swapped, LDAC can be turned off in the headphones' app mid-session), and a check that
     // replaced the real one would be a check that lies.
-    if let reason = await codecRefusal(address: chosen) {
-        log(reason)
-        log("nothing was started, and nothing was written: no login item was created")
+    if let refusal = await codecRefusal(address: chosen) {
+        // The same hand-off the agent does, done here so it happens once and immediately rather
+        // than through a launchd job that would then exit.
+        CodecFallback.record(refusal)
+        log(
+            "these headphones offer no LDAC endpoint (they offer: "
+                + "\(refusal.offered.joined(separator: ", "))). LDAC has to be enabled in the "
+                + "headphones' own app, and not every pair supports it: SBC and AAC are not "
+                + "implemented here.")
+        if await CodecFallback.driveWithMacOS(address: chosen, log: log) != nil {
+            log("CodecBlue is not driving them: macOS is, in AAC or SBC, and you will hear it")
+            log("nothing was written: no login item was created")
+            exit(0)
+        }
+        log("and macOS did not take them either; check System Settings > Bluetooth")
         exit(1)
     }
 
@@ -1907,7 +1944,7 @@ func start(_ arguments: [String]) async throws {
 /// `nil` when the question cannot be asked at all: a probe that failed is not evidence that the
 /// headphones are unsupported, and refusing to start because a probe failed would be worse than
 /// trying and saying why.
-func codecRefusal(address: String) async -> String? {
+func codecRefusal(address: String) async -> CodecFallback.Refusal? {
     let takeover = HeadsetTakeover(address: address, log: { _ in })
     defer { Task { await takeover.handBack() } }
     guard let signaling = try? await takeover.grabSignaling() else { return nil }
@@ -1928,10 +1965,13 @@ func codecRefusal(address: String) async -> String? {
         if codec.name == "LDAC", codec.information.count >= 8 { hasLDAC = true }
     }
     guard !names.isEmpty, !hasLDAC else { return nil }
-    return
-        "these headphones offer no LDAC endpoint (they offer: \(names.joined(separator: ", "))). "
-        + "LDAC has to be enabled in the headphones' own app, and not every pair supports it: "
-        + "SBC and AAC are not implemented."
+    return CodecFallback.Refusal(
+        address: address, name: nameFor(address), offered: names, measuredAt: Date())
+}
+
+/// The name macOS shows for a pair, or the address when it is not in the list.
+func nameFor(_ address: String) -> String {
+    BluetoothHeadphone.audioDevices().first { $0.address == address }?.name ?? address
 }
 
 /// Whether the stream starts at login, without the menu bar app.

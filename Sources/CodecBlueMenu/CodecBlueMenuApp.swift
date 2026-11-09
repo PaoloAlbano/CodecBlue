@@ -79,7 +79,14 @@ struct ContentView: View {
                 } label: {
                     let mark = device.address == model.selectedAddress ? "✓ " : "  "
                     let state = device.isConnected ? "" : " (off)"
-                    Text("\(mark)\(device.name)\(state)")
+                    // What will actually drive them, beside the name.
+                    //
+                    // Asked 2026-11-09: "it would be good to show it next to the name in the
+                    // toolbar". The label is the honest answer to "will this work?": LDAC when
+                    // CodecBlue can drive the pair, AAC when macOS will instead, and nothing at all
+                    // before anyone has asked — because the question costs the link to answer, and
+                    // a guess in that position is worse than a blank.
+                    Text("\(mark)\(device.name)\(state)\(model.codecNote(for: device))")
                 }
             }
         }

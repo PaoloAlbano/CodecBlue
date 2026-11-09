@@ -404,6 +404,10 @@ public final class A2DPStreamer: @unchecked Sendable {
             }
         }
         guard let ldac else { throw StreamError.noLDAC(offered) }
+        // The pair does offer LDAC after all: forget any refusal recorded for it. The headphones'
+        // own app can be changed between sessions, and a memory that outlived its truth would hide
+        // a working pair behind a label saying it cannot work.
+        CodecFallback.clear(address: takeover.address)
         // The rate the caller asked for is a preference, not a requirement: a device that only
         // takes 44.1 kHz is still a device we can drive. Falling back here is what makes this
         // work with headphones other than the ones it was developed on.

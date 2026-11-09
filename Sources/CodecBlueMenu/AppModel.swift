@@ -160,6 +160,27 @@ final class AppModel: ObservableObject {
         return parts.joined(separator: " · ")
     }
 
+    /// What is driving a pair, for the line beside its name: " · LDAC", " · AAC via macOS", or
+    /// nothing when nobody has asked yet.
+    ///
+    /// The refusal is read from disk, not measured: measuring means opening an AVDTP channel, which
+    /// forces macOS off the headphones for a second. That is acceptable once, when someone presses
+    /// Start; it is not acceptable every two seconds to decorate a menu. So the answer is whatever
+    /// the last attempt found, and a pair nobody has tried is left blank rather than guessed at.
+    func codecNote(for device: BluetoothHeadphone) -> String {
+        guard device.isConnected else { return "" }
+        if let refusal = CodecFallback.refusal(for: device.address) {
+            // "AAC" is what macOS will negotiate for almost every pair; naming the codecs the pair
+            // actually offered is more honest than naming one, and it is what the log says.
+            let offered = refusal.offered.filter { $0 == "AAC" || $0 == "SBC" }
+            let what =
+                offered.isEmpty ? "SBC/AAC" : Array(Set(offered)).sorted().joined(separator: "/")
+            return " · \(what) via macOS"
+        }
+        if isStreaming, device.address == selectedAddress { return " · LDAC" }
+        return ""
+    }
+
     // MARK: - Actions
 
     /// Called when the menu appears, so polling stops rebuilding it.
