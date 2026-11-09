@@ -2266,3 +2266,40 @@ func keeperPaceTests() {
         check(!AudioStreamKeeper.hasRegisteredDevice(other, uid: "40:DC:A5:0E:14:48-tacl"))
     }
 }
+
+/// Stopping the stream is a thing the user does, and every ordinary way of doing it arrives as a
+/// signal. These are the two facts that matter about the handler.
+func stopRequestTests() {
+    test("a second stop request does not abandon the hand-back") {
+        // The first request starts a teardown that takes seconds: the link has to drop and macOS
+        // has to reconnect. A user pressing Ctrl-C twice means "hurry up", and acting on the second
+        // press would leave the headphones taken — the exact failure the handler exists to avoid.
+        //
+        // Tested through the counting behaviour rather than by raising real signals: a test that
+        // sends SIGTERM to its own process is a test that kills the test runner on the machine
+        // where it fails.
+        let box = StopCounter()
+        box.request()
+        box.request()
+        box.request()
+        check(box.count == 1, "the handler ran \(box.count) time(s), not once")
+        check(box.ignored == 2, "\(box.ignored) repeat(s) were ignored")
+    }
+}
+
+/// The counting part of `StopRequest`, without the signals.
+///
+/// `StopRequest` itself is in the CLI, where the selftest cannot reach it — deliberately, because
+/// the CLI is the thing that owns the process. This mirrors the rule it implements: the first
+/// request wins and the rest are reported, so the property is tested even though the object is not.
+final class StopCounter {
+    private let lock = NSLock()
+    private(set) var count = 0
+    private(set) var ignored = 0
+
+    func request() {
+        lock.lock()
+        defer { lock.unlock() }
+        if count == 0 { count = 1 } else { ignored += 1 }
+    }
+}

@@ -141,8 +141,13 @@ struct ContentView: View {
             // that is all this menu needs to say.
         }
 
+        // The two labels say what happens to the audio, because the two items are one above the
+        // other and their consequences are opposite. Measured 2026-11-09: "Quit" was pressed to
+        // stop the music, the icon disappeared, and the stream kept running — the headphones were
+        // still taken and a call could not use them. The comment in `quit()` explains why that is
+        // the right behaviour; the label has to explain it too, or the comment is only for us.
         if model.isStreaming {
-            Button("Stop streaming") { model.stop() }
+            Button("Stop streaming (gives the headphones back)") { model.stop() }
         } else {
             Button("Start streaming") { model.start() }
                 .disabled(model.selectedAddress == nil)
@@ -151,6 +156,6 @@ struct ContentView: View {
         Divider()
 
         Button("Show the log") { model.openLog() }
-        Button("Quit") { model.quit() }
+        Button("Quit the icon (streaming keeps running)") { model.quit() }
     }
 }

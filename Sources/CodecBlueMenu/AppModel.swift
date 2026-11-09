@@ -241,12 +241,31 @@ final class AppModel: ObservableObject {
     }
 
     func stop(keepSelection: Bool = true) {
-        _ = ControlClient.send("quit")
-        // And unload the agent, or launchd's KeepAlive would start it again five seconds later —
-        // which is the right behaviour for a crash and the wrong one for a deliberate stop.
+        // Unload the agent first, then ask the stream to stop.
+        //
+        // The order looks arbitrary and is not. `unload` sends SIGTERM, which the stream now
+        // handles by stopping politely and handing the headphones back — but the hand-back takes
+        // a few seconds (the link has to drop, then macOS has to reconnect), and unloading also
+        // removes the thing that would restart it. Asking the socket first and unloading
+        // immediately after would race a teardown that has not finished.
+        //
+        // Keeping the agent loaded and only sending `quit` is worse: KeepAlive restarts the stream
+        // five seconds later, which is right for a crash and wrong for a deliberate stop.
         try? LaunchAgent.unload()
+        _ = ControlClient.send("quit")
         if !keepSelection { selectedAddress = nil }
-        refresh()
+        // The stream is still handing the headphones back; the icon should say so rather than
+        // flipping to "not streaming" while the link is still ours.
+        note = "stopping: handing the headphones back to macOS"
+        // The class is already @MainActor, so this inherits it: no annotation needed, and adding
+        // one would suggest the isolation was in doubt.
+        Task {
+            // A little longer than the teardown takes, so the note does not disappear while it is
+            // still true.
+            try? await Task.sleep(for: .seconds(7))
+            note = nil
+            refresh()
+        }
     }
 
     /// Writes the rate into the ring's header, which the driver reads when coreaudiod loads it.

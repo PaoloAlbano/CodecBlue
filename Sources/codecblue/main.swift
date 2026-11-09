@@ -29,6 +29,62 @@ import Foundation
 
 let start = Date()
 
+/// Stops the stream when this process is asked to stop, politely, whichever way it is asked.
+///
+/// Two signals mean the same thing and arrive from different places:
+///
+///   SIGINT   Ctrl-C in a terminal.
+///   SIGTERM  `launchctl unload`, a logout, a reboot, `kill`. This is the one that matters and the
+///            one that was missing: the agent is owned by launchd, so *every* ordinary way of
+///            stopping it — the menu's Stop, a reboot, `launchctl unload` — arrives as SIGTERM.
+///            Unhandled, the process dies where it stands and the headphones stay taken: macOS
+///            never gets them back, and the only cure is putting them in the case for a few
+///            seconds. Measured 2026-11-09: a stream stopped from the menu left the FreeBuds
+///            unreachable until they were re-cradled.
+///
+/// The handler only *asks* the stream to stop. The teardown that hands the headphones back is the
+/// normal path at the end of `play`/`playSystem`, which is already written and already tested —
+/// doing the hand-back inside a signal handler would mean doing async work in a context where the
+/// runtime is going away underneath it.
+///
+/// A second signal is ignored rather than acted on: the first one started a teardown that takes a
+/// few seconds (the link has to drop and macOS has to reconnect), and a user pressing Ctrl-C twice
+/// means "hurry up", not "abandon the hand-back".
+final class StopRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked = false
+    private var handler: (@Sendable () -> Void)?
+
+    /// Registers the teardown's trigger and starts listening on both signals.
+    func listen(onStop: @escaping @Sendable () -> Void) {
+        lock.withLock { handler = onStop }
+        for signalNumber in [SIGINT, SIGTERM] {
+            signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
+            source.setEventHandler { [weak self] in self?.request(reason: signalNumber) }
+            source.resume()
+            // Held, or the source is deallocated and the signal goes back to killing the process.
+            sources.append(source)
+        }
+    }
+
+    private var sources: [DispatchSourceSignal] = []
+
+    private func request(reason: Int32) {
+        lock.lock()
+        let alreadyAsked = asked
+        asked = true
+        let handler = self.handler
+        lock.unlock()
+        guard !alreadyAsked else {
+            log("already stopping: the headphones are being handed back, this takes a few seconds")
+            return
+        }
+        log(reason == SIGTERM ? "asked to stop (SIGTERM): stopping" : "interrupted: stopping")
+        handler?()
+    }
+}
+
 @Sendable func log(_ message: String) {
     let t = Date().timeIntervalSince(start)
     FileHandle.standardError.write(Data(String(format: "[%7.3f] %@\n", t, message).utf8))
@@ -61,6 +117,7 @@ func usage() -> Never {
                    codecblue handlers device|general  (which handler answers each known message)
                    codecblue agent   install|remove|status [ADDR] [options]
                    codecblue audioprobe ADDR   (sends one known message; needs CODECBLUE_AUDIO_CHANNEL=yes)
+                   codecblue stop                         (stop the stream and the agent)
                    codecblue release XX:XX:XX:XX:XX:XX
 
             """.utf8))
@@ -261,15 +318,15 @@ func play(_ address: String, _ options: [String]) async throws {
     let takeover = HeadsetTakeover(address: address, log: log)
     takeover.lowLatency = lowLatency
     let streamerBox = StreamerBox()
-    // Ctrl-C: stop streaming; the normal path below then hands the headphones back.
-    signal(SIGINT, SIG_IGN)
-    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-    interrupt.setEventHandler {
-        log("interrupted: stopping")
+    // Ctrl-C, or SIGTERM from launchd: stop streaming; the normal path below then hands the
+    // headphones back.
+    // Held for the life of the function: it owns the signal sources, and a source that is
+    // deallocated takes the handler with it.
+    let stopRequest = StopRequest()
+    stopRequest.listen {
         streamerBox.streamer?.stop()
         streamerBox.interrupted = true
     }
-    interrupt.resume()
 
     do {
         let signaling = try await takeover.grabSignaling()
@@ -523,14 +580,11 @@ func playSystem(_ address: String, options: [String]) async throws {
 
     let takeover = HeadsetTakeover(address: address, log: log)
     let box = StreamerBox()
-    signal(SIGINT, SIG_IGN)
-    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-    interrupt.setEventHandler {
-        log("interrupted: stopping")
+    let stopRequest = StopRequest()
+    stopRequest.listen {
         box.streamer?.stop()
         box.interrupted = true
     }
-    interrupt.resume()
 
     // The keeper needs the UUID, and the UUID is only in bluetoothd's log — which is written when
     // the headphones connect. `play` (and the agent) start with the headphones *off*, ask macOS to
@@ -1334,6 +1388,35 @@ do {
         print(lines.joined(separator: "\n"))
     case ("handlers", 2):
         try await handlers(arguments[1])
+    case ("stop", 1):
+        // One command that stops the stream *and* the agent that would restart it.
+        //
+        // Both are needed and neither is obvious. `quit` down the control socket stops the stream
+        // and hands the headphones back, but launchd's KeepAlive starts it again five seconds
+        // later — right for a crash, wrong for a deliberate stop. Unloading the agent alone kills
+        // the process with SIGTERM, which now stops it politely (see `StopRequest`) but leaves the
+        // ordering to chance. Doing them in this order is what the menu's Stop does, and it is the
+        // only sequence that ends with the headphones back on macOS and nothing running.
+        let socket = ControlServer.defaultPath
+        if FileManager.default.fileExists(atPath: socket) {
+            if let reply = ControlClient.send("quit") {
+                log("stream: \(reply.first ?? "ok")")
+            } else {
+                log("stream: the socket is there but nothing answered")
+            }
+            // Give the teardown the time it needs: it drops the link, waits for it to go, and asks
+            // macOS to reconnect. Rushing this is what leaves the headphones taken.
+            try await Task.sleep(for: .seconds(6))
+        } else {
+            log("stream: nothing running")
+        }
+        if FileManager.default.fileExists(atPath: LaunchAgent.plistURL.path) {
+            try? LaunchAgent.unload()
+            log("agent: unloaded (it will not restart until it is loaded again)")
+            log("to start it again: launchctl load \(LaunchAgent.plistURL.path)")
+        } else {
+            log("agent: not installed")
+        }
     case ("agent", 2...):
         // `agent install <address> [options]`, `agent remove`, `agent status`
         let action = arguments[1]
