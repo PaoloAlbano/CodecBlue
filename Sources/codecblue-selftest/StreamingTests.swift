@@ -2880,3 +2880,31 @@ func keeperWindowTests() {
         check(body.contains("\"show\", \"--last\", \"30m\""), "the seed is wide enough")
     }
 }
+
+/// Unloading and removing are two different acts, and only one survives a reboot.
+///
+/// The plist is a loaded gun at the next login: with the headphones in their case it is a retry
+/// loop for as long as the Mac is on. `codecblue stop` unloads and deliberately leaves the file —
+/// stopping a stream should not opt someone out of an arrangement they chose — so there has to be a
+/// verb that removes it, and `login off` is that verb.
+func loginItemRemovalTests() {
+    test("removing the plist is what makes it not start at login") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("public static func remove()"), "there is a verb for it")
+        check(
+            body.contains("removeItem(at: plistURL)"),
+            "and it removes the file, not just the job")
+        check(body.contains("public static func isInstalled()"), "and a way to ask")
+    }
+
+    test("login off removes it, and says the stream is untouched") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("LaunchAgent.remove()"), "off removes the file")
+        check(
+            body.contains("the stream itself, if one is running, is untouched"),
+            "and does not claim to have stopped the stream")
+    }
+}

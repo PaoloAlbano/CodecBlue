@@ -1844,7 +1844,7 @@ func login(_ action: String) throws {
     let plist = LaunchAgent.plistURL
     switch action {
     case "on":
-        guard FileManager.default.fileExists(atPath: plist.path) else {
+        guard LaunchAgent.isInstalled() else {
             log(
                 "nothing to start at login yet: run `codecblue start` first, which writes \(plist.path)"
             )
@@ -1853,16 +1853,20 @@ func login(_ action: String) throws {
         try LaunchAgent.load()
         log("the stream starts at login (from \(plist.path))")
     case "off":
-        try? LaunchAgent.unload()
-        if FileManager.default.fileExists(atPath: plist.path) {
-            try FileManager.default.removeItem(at: plist)
+        // Both halves, and the second is the one people mean: unloading stops the agent now,
+        // removing the file stops it coming back at the next login. `stop` deliberately does only
+        // the first — stopping a stream should not opt someone out of an arrangement they chose —
+        // so this is the verb that does the second.
+        if LaunchAgent.isInstalled() {
+            LaunchAgent.remove()
             log("removed \(plist.path): the stream will not start at login any more")
         } else {
+            LaunchAgent.remove()
             log("it was not going to start at login (no \(plist.path))")
         }
-        log("the stream itself is still running; `codecblue stop` stops it now")
+        log("the stream itself, if one is running, is untouched; `codecblue stop` stops it now")
     case "status":
-        let installed = FileManager.default.fileExists(atPath: plist.path)
+        let installed = LaunchAgent.isInstalled()
         log("starts at login: \(installed ? "yes" : "no")")
         log("plist: \(installed ? plist.path : "not installed")")
         log("loaded now: \(LaunchAgent.isLoaded() ? "yes" : "no")")

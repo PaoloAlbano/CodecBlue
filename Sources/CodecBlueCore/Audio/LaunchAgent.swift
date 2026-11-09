@@ -137,6 +137,26 @@ public enum LaunchAgent {
             .write(to: plistURL, atomically: true, encoding: .utf8)
     }
 
+    /// Removes the plist, so nothing starts at the next login.
+    ///
+    /// `unload` and `remove` are two different acts and the difference matters: unloading stops the
+    /// agent now, removing the file stops it from ever coming back. `codecblue stop` does the first
+    /// and deliberately not the second — stopping a stream should not silently opt a person out of
+    /// an arrangement they chose. But the file left behind is a loaded gun at the next login: with
+    /// the headphones in their case it is a five-second retry loop for as long as the Mac is on,
+    /// and every attempt used to change the system output.
+    ///
+    /// So this is its own verb, `codecblue login off`, and it says what it did.
+    public static func remove() {
+        run("/bin/launchctl", ["unload", plistURL.path])
+        try? FileManager.default.removeItem(at: plistURL)
+    }
+
+    /// Whether the plist is on disk, which is what decides whether the next login starts us.
+    public static func isInstalled() -> Bool {
+        FileManager.default.fileExists(atPath: plistURL.path)
+    }
+
     /// The stable path to the binary, not SwiftPM's internal one.
     ///
     /// `CommandLine.arguments[0]` and `Bundle.main.executableURL` both point into
