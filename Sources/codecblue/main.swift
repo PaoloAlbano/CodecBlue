@@ -513,21 +513,32 @@ func playSystemOnce(
             "system output: not changed — either CodecBlue is not installed or it already was the "
                 + "output. If apps play and you hear nothing, select CodecBlue as the output.")
     }
-    let interruptedByCall = try await playSystemSession(
-        address, options: options, monitor: monitor, stopRequest: stopRequest)
-    switch await DefaultOutput.giveBack(previousOutput) {
-    case .restored(let name):
-        DefaultOutput.forget()
-        log("system output: back to \(name)")
-    case .leftAlone(let name):
-        DefaultOutput.forget()
-        log("system output: left on \(name) — you chose it")
-    case .gone(let name):
-        log("system output: \(name) did not come back; leaving CodecBlue selected")
-    case .nothingToDo:
-        DefaultOutput.forget()
+    // The output is given back on every way out, including a throw. It used to be given back only
+    // after a session that returned normally, so a handshake that failed left CodecBlue selected
+    // with nothing feeding it — a silent Mac, and the one thing this whole file exists to avoid.
+    func giveBackOutput() async {
+        switch await DefaultOutput.giveBack(previousOutput) {
+        case .restored(let name):
+            DefaultOutput.forget()
+            log("system output: back to \(name)")
+        case .leftAlone(let name):
+            DefaultOutput.forget()
+            log("system output: left on \(name) — you chose it")
+        case .gone(let name):
+            log("system output: \(name) did not come back; leaving CodecBlue selected")
+        case .nothingToDo:
+            DefaultOutput.forget()
+        }
     }
-    return interruptedByCall
+    do {
+        let interruptedByCall = try await playSystemSession(
+            address, options: options, monitor: monitor, stopRequest: stopRequest)
+        await giveBackOutput()
+        return interruptedByCall
+    } catch {
+        await giveBackOutput()
+        throw error
+    }
 }
 
 /// Whether bluetoothd says the headphones have a link right now.
@@ -1159,6 +1170,20 @@ func playSystemSession(
         log("stopped before the stream started: not taking the headphones")
         await takeover.handBack(handBackStyle)
         return false
+    } catch {
+        // Any other failure in the handshake leaves the headphones *taken*: the signaling channel
+        // is ours, macOS has been forced off the link, and its audio device is gone. Without this
+        // the process exits holding them, macOS never republishes them, and the Mac is silent —
+        // which is exactly what was reported on 2026-11-09 with a pair that offers no LDAC:
+        // "I press Start streaming and I hear nothing".
+        //
+        // A failure to *start* a stream must leave the headphones exactly as they were found. The
+        // error is rethrown afterwards, because the caller still has to know why.
+        log("could not start the stream: \(error)")
+        await streamer.tearDown()
+        log("handing the headphones back to macOS")
+        await takeover.handBack(handBackStyle)
+        throw error
     }
     // A stop that arrived during the handshake: everything below assumes a live stream. Check
     // here, once, rather than in each of the places that would otherwise have to know.
@@ -1847,6 +1872,23 @@ func start(_ arguments: [String]) async throws {
         }
     }
 
+    // Check the one thing that cannot work before writing anything.
+    //
+    // Measured 2026-11-09: `start` with a pair that offers no LDAC wrote a plist, loaded it, and
+    // then the agent failed twice a minute for as long as the Mac was on — while the command had
+    // already said "streaming to …". A start that cannot start must say so and leave no trace:
+    // nothing in ~/Library/LaunchAgents, nothing loaded, nothing to undo.
+    //
+    // The check is the same question the streamer asks later, asked early. It is not a duplicate of
+    // it: `setUp` still refuses, because the answer can change between here and there (a pair can
+    // be swapped, LDAC can be turned off in the headphones' app mid-session), and a check that
+    // replaced the real one would be a check that lies.
+    if let reason = await codecRefusal(address: chosen) {
+        log(reason)
+        log("nothing was started, and nothing was written: no login item was created")
+        exit(1)
+    }
+
     // The same two steps the menu does, in the same order: write the plist, then load it.
     try LaunchAgent.install(address: chosen, arguments: options)
     try LaunchAgent.load()
@@ -1854,6 +1896,42 @@ func start(_ arguments: [String]) async throws {
     log("it also starts at login from now on: launchd loads \(LaunchAgent.plistURL.path)")
     log("log: \(LaunchAgent.logPath)")
     log("to stop it and give the headphones back: codecblue stop")
+}
+
+/// Why this pair cannot be driven, or `nil` if it can.
+///
+/// Asks bluetoothd for the pair's AVDTP endpoints — the same DISCOVER the streamer does — and looks
+/// for an LDAC one. It costs a second and it is the difference between "start" meaning started and
+/// "start" meaning a plist that will fail twice a minute.
+///
+/// `nil` when the question cannot be asked at all: a probe that failed is not evidence that the
+/// headphones are unsupported, and refusing to start because a probe failed would be worse than
+/// trying and saying why.
+func codecRefusal(address: String) async -> String? {
+    let takeover = HeadsetTakeover(address: address, log: { _ in })
+    defer { Task { await takeover.handBack() } }
+    guard let signaling = try? await takeover.grabSignaling() else { return nil }
+    defer { signaling.close() }
+    guard let discover = try? await signaling.command(.discover) else { return nil }
+    var names: [String] = []
+    var hasLDAC = false
+    for endpoint in AVDTP.parseDiscover(discover.payload)
+    where endpoint.isSink
+        && endpoint.mediaType == 0
+    {
+        guard
+            let reply = try? await signaling.command(.getCapabilities, Data([endpoint.seid << 2]))
+        else { continue }
+        let caps = AVDTP.parseCapabilities(reply.payload)
+        guard let codec = caps.codec else { continue }
+        names.append(codec.name)
+        if codec.name == "LDAC", codec.information.count >= 8 { hasLDAC = true }
+    }
+    guard !names.isEmpty, !hasLDAC else { return nil }
+    return
+        "these headphones offer no LDAC endpoint (they offer: \(names.joined(separator: ", "))). "
+        + "LDAC has to be enabled in the headphones' own app, and not every pair supports it: "
+        + "SBC and AAC are not implemented."
 }
 
 /// Whether the stream starts at login, without the menu bar app.

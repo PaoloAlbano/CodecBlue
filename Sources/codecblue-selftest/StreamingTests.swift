@@ -2933,3 +2933,53 @@ func permanentFailureTests() {
             "and it says what to change instead of inviting a retry")
     }
 }
+
+/// A failure to start must leave the headphones and the Mac exactly as it found them.
+///
+/// Reported 2026-11-09, with a pair that offers no LDAC: "I select the headphones, I press Start
+/// streaming, and nothing — I hear nothing." The handshake took the link, macOS was forced off it,
+/// the LDAC endpoint was missing, and the throw went straight out of the process holding both. The
+/// headphones were never handed back and the system output was never restored, so the Mac had no
+/// audio at all — worse than not having pressed the button.
+func failedStartTests() {
+    test("every way out of a session gives the output back") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        // The restore is a function called on both paths, not a `defer` that only the happy path
+        // reaches. `defer` would work too; the point is that it is not conditional.
+        check(body.contains("func giveBackOutput() async"), "one place that gives it back")
+        check(body.contains("await giveBackOutput()"), "called on the way out")
+        let throwingPaths = body.components(separatedBy: "throw error").count - 1
+        check(throwingPaths >= 1, "and there is a throwing path to cover")
+    }
+
+    test("a handshake that fails hands the headphones back before rethrowing") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let start = body.range(of: "configuration = try await streamer.setUp"),
+            let end = body.range(of: "// A stop that arrived during the handshake")
+        else {
+            check(false, "the setUp block must exist")
+            return
+        }
+        let block = String(body[start.lowerBound..<end.lowerBound])
+        check(block.contains("await takeover.handBack"), "the headphones go back")
+        check(block.contains("throw error"), "and the caller still learns why")
+    }
+
+    test("start refuses before writing a login item it cannot honour") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let refusal = body.range(of: "if let reason = await codecRefusal(address: chosen)"),
+            let install = body.range(
+                of: "try LaunchAgent.install(address: chosen, arguments: options)")
+        else {
+            check(false, "both the check and the install must exist")
+            return
+        }
+        check(refusal.lowerBound < install.lowerBound, "the check comes first")
+        check(
+            body.contains("nothing was started, and nothing was written"),
+            "and it says so")
+    }
+}
