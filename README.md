@@ -28,11 +28,15 @@ kernel extensions, no root daemon — and no proprietary app deciding which code
 > - the skips were the packet queue discarding the **front** of the cushion instead of the
 >   back, so the stall that caused the overflow found nothing to play (§13.13).
 >
-> The ceiling of ~500 kbps on this machine is a controller limit: it never negotiates 3-slot
+> The ceiling of ~410 kbps on this machine is a controller limit: it never negotiates 3-slot
 > packets (`Link Adaptive Packet type support = 0`) and macOS does not expose
 > `HCISetACLPacketType`. LDAC HQ at 990 kbps is therefore not reachable here, and that is a
 > property of the hardware, not of this program — which is why the level is chosen from the
-> measured bitrate instead of from a preference.
+> measured bitrate instead of from a preference. The number is measured, not estimated:
+> `codecblue flood` offers the link raw ACL packets and 22,716 of them were refused in 15
+> seconds, settling at 410 kbps. Audio gets a little less than that, because the cushion has
+> to absorb the stalls: 303 kbps plays with the cushion empty, while 363 kbps plays only as
+> long as the stalls stay rare (`notes/findings/2026-11-10-ceiling-window.md`).
 
 ## How it works
 
@@ -42,8 +46,10 @@ and takes over **only your headphones' audio channels**:
 1. It asks `bluetoothd` (through its classic Bluetooth XPC service) for the headphones'
    A2DP signaling and media channels, and for their remote-control (AVRCP) channel.
 2. It negotiates the codec itself (AVDTP) and streams audio encoded with **LDAC**. aptX, AAC
-   and SBC are the plan, not a claim: a pair of headphones that offers no LDAC endpoint gets an
-   error that says so, instead of a configuration puzzle.
+   and SBC are not implemented here and are not planned: a pair of headphones that offers no LDAC
+   endpoint is handed straight back to macOS, which plays to it in AAC or SBC — you hear sound, and
+   the menu says `· AAC via macOS` beside the pair. Writing a second encoder would be a second
+   packetiser and a second set of bugs for a result the system already produces.
 3. Audio comes from a **CodecBlue virtual output device**. It appears in the output list only
    while a stream is running, and starting the stream selects it for you: the device is hidden
    when nothing can feed it, because a device that accepts audio and throws it away is worse than
@@ -55,6 +61,14 @@ and takes over **only your headphones' audio channels**:
    call you hear in AAC, not LDAC: 330 kbps of LDAC does not fit beside a call link, and every
    implementation makes the same trade. The microphone is the headphones' own, at call quality.
    `--no-call-monitor` turns the hand-off off, and `codecblue release ADDR` does it by hand.
+
+   The microphone **cannot** live inside our own link, and that is measured rather than assumed:
+   SCO is not reachable through the XPC protocol this program uses. `codecblue probe-sco ADDR`
+   asks the question directly — a control L2CAP channel opens with MTU 895, while `openChannel`
+   with any other `kCBMsgArgType` is rejected with result 3, i.e. the message is invalid rather
+   than the headphones refusing. Reaching SCO means going under `bluetoothd` to the Skywalk
+   channels with SIP on, which is weeks of work and two masters on one link. So a call is a
+   hand-off, not a feature of the stream.
 
 Keyboards, mice and every other Bluetooth device stay with macOS and keep working.
 

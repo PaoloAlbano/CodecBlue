@@ -344,10 +344,24 @@ public final class ClassicXPCSession: @unchecked Sendable {
     /// Opens an L2CAP channel. bluetoothd allows one request per session and device at a
     /// time; a second one is refused with 1803.
     public func openChannel(
-        _ device: UUID, psm: UInt16, priority: Int64 = 0, timeout: TimeInterval = 5
+        _ device: UUID, psm: UInt16, priority: Int64 = 0, timeout: TimeInterval = 5,
+        channelType: Int64? = nil
     ) async throws -> OpenedChannel {
         let args = deviceArgs(device)
         xpc_dictionary_set_int64(args, XPCKey.psm, Int64(psm))
+        // The transport, when the caller wants something other than L2CAP.
+        //
+        // `kCBMsgArgType` is the key bluetoothd uses for the channel kind in `openChannel`; today
+        // this program only sends it in the check-in, where it means the client type. Whether it
+        // also selects SCO is the question the probe in `codecblue probe-sco` exists to answer:
+        // if bluetoothd replies with a socket, the microphone inside our own LDAC link is days of
+        // work instead of weeks of Skywalk. If it refuses, the answer is weeks and the plan says so.
+        // `kCBMsgArgType` is set here and nothing else changes: the waiter table stays keyed by the
+        // PSM, because the reply carries the PSM back and that is what matches it. Keying by type
+        // instead was tried and is wrong — the reply still says PSM 0, so the answer was dropped
+        // and every attempt timed out, which reads as "bluetoothd did not answer" when in fact it
+        // had answered. Measured 2026-11-09.
+        if let channelType { xpc_dictionary_set_int64(args, XPCKey.type, channelType) }
         let options = xpc_dictionary_create(nil, nil, 0)
         if priority != 0 { xpc_dictionary_set_int64(options, XPCKey.channelPriority, priority) }
         xpc_dictionary_set_value(args, XPCKey.options, options)

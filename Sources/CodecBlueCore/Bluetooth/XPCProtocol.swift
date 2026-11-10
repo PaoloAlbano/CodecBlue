@@ -103,4 +103,12 @@ public enum ChannelResult {
     public static let alreadyConnected: Int = 1803  // this session already has a channel request
     public static let refusedNoResources: Int = 454  // the headphones refused (macOS holds it)
     public static let rfcommBusy: Int = 913  // macOS already holds this RFCOMM channel
+    /// The request itself was rejected, before the headphones were involved.
+    ///
+    /// Measured 2026-11-09 with `codecblue probe-sco`: `openChannel` with a `kCBMsgArgType` other
+    /// than L2CAP returns 3 for every value tried (0, 1, 2, 3), while the control — a plain L2CAP
+    /// PSM 0x19 on the same session, same device, same second — opens with MTU 895. So 3 is not
+    /// "the headphones refused" (that is 454) and not "macOS holds it": it is bluetoothd saying
+    /// the message is not valid, which is the answer to whether SCO can be reached this way.
+    public static let invalidRequest: Int = 3
 }

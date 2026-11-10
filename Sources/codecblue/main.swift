@@ -123,6 +123,7 @@ func usage() -> Never {
                    codecblue play   XX:XX:XX:XX:XX:XX [FILE.wav] [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
                                     [--media-priority N] [--media-mtu N|0] [--sndbuf-packets N]
                                     [--no-hfp] [--no-avrcp] [--low-latency] [--keep-link-quality] [--adapt] [--gain X]
+                                    [--report-ms N]
                    codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
                                     (plays the CodecBlue virtual device)
                    codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
@@ -262,6 +263,11 @@ func play(_ address: String, _ options: [String]) async throws {
     var gain: Float = 1
     var holdHandsFree = true
     var holdAVRCP = true
+    // How often the stream reports, in milliseconds. The default is 2 s, which is right for a log
+    // you read while listening; a measurement wants shorter windows, because the question is not
+    // "what does this link average" but "what is the worst two seconds it has", and the second
+    // question is the one a margin has to answer.
+    var reportMilliseconds = 0.0
     var rest = options[...]
     while let option = rest.popFirst() {
         switch option {
@@ -283,6 +289,10 @@ func play(_ address: String, _ options: [String]) async throws {
             guard let value = rest.popFirst(), let packets = Int(value), (1...16).contains(packets)
             else { usage() }
             sendBufferPackets = packets
+        case "--report-ms":
+            guard let value = rest.popFirst(), let ms = Double(value), ms >= 100, ms <= 10000
+            else { usage() }
+            reportMilliseconds = ms
         case "--low-latency":
             lowLatency = true
         case "--keep-link-quality":
@@ -367,6 +377,13 @@ func play(_ address: String, _ options: [String]) async throws {
         streamer.mediaMTU = mediaMTU
         streamer.sendBufferPackets = sendBufferPackets
         streamer.adaptBitrate = adaptBitrate
+        if reportMilliseconds > 0 {
+            streamer.reportInterval = reportMilliseconds / 1000
+            // The first three windows are deliberately short so a bad start shows up early; with a
+            // short window asked for, they would be shorter still and measure nothing.
+            streamer.firstReportInterval = reportMilliseconds / 1000
+            streamer.firstReports = 0
+        }
         streamer.holdHandsFree = holdHandsFree
         streamer.holdAVRCP = holdAVRCP
         streamerBox.streamer = streamer
@@ -1108,7 +1125,21 @@ func playSystemSession(
     // cushion. The link's cushion is the packet queue, which has its own adaptation.
     // The ring's floor: enough that a read never comes back short, never more. It is a jitter
     // buffer for the writer, not a cushion for the link — the link's cushion is the queue.
-    let ringTarget = 0.04
+    //
+    // It has to be *larger* than the encoder's lead, and it was not: both were 40 ms, so the
+    // margin between "how far ahead the encoder wants to be" and "how much audio the ring holds"
+    // was zero, and any jitter at all made a read come back short.
+    //
+    // Measured 2026-11-10, reported as "it crackles, but only once the sound starts": 462 windows
+    // out of 8 656 had a short read, holding 131 435 frames in total — 2 980 ms of plateau, where
+    // the last sample is repeated instead of the audio that had not arrived. That is a flat step
+    // in the waveform, repeated a few hundred times a minute: exactly a crackle, and invisible in
+    // every other number (0 skips, 0 dropped, `link took 99%`).
+    //
+    // The ring's median depth was 1 946 frames (44 ms) against a 40 ms target, so the servo was
+    // holding it *at* the boundary rather than above it. 100 ms gives the writer's jitter 60 ms of
+    // room and costs 60 ms of latency, which is the honest trade: a plateau is worse than a delay.
+    let ringTarget = 0.10
     streamer.drainBoost = {
         let depth = ring.available
         let target = Int(ringTarget * Double(ring.sampleRate))
@@ -1369,7 +1400,12 @@ func playSystem(_ address: String, options: [String]) async throws {
                     format: "the headphones are not reachable; retrying in %.0f s "
                         + "(they are off, out of range, or in their case)",
                     backoff))
-            try? await Task.sleep(for: .seconds(backoff))
+            // A sleep that ignores the stop request is a process that cannot be stopped: measured
+            // 2026-11-09, `codecblue stop` sent SIGTERM, the log said "asked to stop (SIGTERM):
+            // stopping", and the process went on sleeping for another forty seconds and then tried
+            // again. `stop` waited twenty and gave up. The wait is now interruptible, in slices,
+            // and the stop request is checked between them.
+            if await sleepUnlessStopping(backoff, stopRequest: stopRequest) { break }
             backoff = min(backoff * 2, 60)
             continue
         } catch A2DPStreamer.StreamError.noLDAC(let rawOffered) {
@@ -1418,7 +1454,7 @@ func playSystem(_ address: String, options: [String]) async throws {
                     error.description,
                     permanent ? " (this will not fix itself: check the headphones' own app)" : "",
                     wait))
-            try? await Task.sleep(for: .seconds(wait))
+            if await sleepUnlessStopping(wait, stopRequest: stopRequest) { break }
             backoff = min(backoff * 2, 60)
             continue
         }
@@ -1777,13 +1813,33 @@ do {
         }
         // Then ask politely, in case the process survived the unload (it can, for the length of a
         // teardown: SIGTERM is handled, not obeyed instantly).
+        //
+        // And if nothing answers, look for the process itself. A stream started by hand —
+        // `codecblue system ADDR` in a terminal, or `codecblue play` — is not a launchd job, so
+        // there is nothing to unload and the socket may be gone; without this, `stop` reported
+        // "stream: nothing running" and left it running. Measured 2026-11-09: the process kept the
+        // headphones and the system output while `stop` said there was nothing to stop.
+        var stoppedByHand = false
+        var answered = false
         if FileManager.default.fileExists(atPath: socket) {
             if let reply = ControlClient.send("quit") {
                 log("stream: \(reply.first ?? "ok")")
+                answered = true
             } else {
-                log("stream: the socket is there but nothing answered")
+                // The file is there and nobody is listening: a socket left behind by a process
+                // that died. It is not evidence that there is nothing to stop, and it used to be
+                // treated as exactly that — measured 2026-11-09, `stop` said "the socket is there
+                // but nothing answered" and returned while a hand-started `codecblue system` kept
+                // the headphones. The stale file is removed and the search goes on.
+                log("stream: the socket is stale (nothing answered); looking for the process")
+                try? FileManager.default.removeItem(atPath: socket)
             }
-        } else {
+        }
+        if !answered, let pid = strayStream() {
+            log("stream: not a launchd job (pid \(pid)); asking it to stop")
+            kill(pid, SIGTERM)
+            stoppedByHand = true
+        } else if !answered {
             log("stream: nothing running")
         }
         // Wait for the result instead of guessing how long a teardown takes: the headphones are
@@ -1794,8 +1850,20 @@ do {
             let ours = SystemVolume.findDevice(named: "CodecBlue") != nil
             let output = DefaultOutput.current()
             let outputIsOurs = output.map { $0.name == "CodecBlue" } ?? false
-            if !stillLoaded && !ours && !outputIsOurs { break }
+            let stillRunning = stoppedByHand ? strayStream() != nil : false
+            if !stillLoaded && !ours && !outputIsOurs && !stillRunning { break }
             try await Task.sleep(for: .milliseconds(250))
+        }
+        if stoppedByHand, let pid = strayStream() {
+            // A SIGTERM that was not obeyed in twenty seconds is a process stuck in a teardown —
+            // the link not falling, macOS not answering. SIGKILL is the honest last resort: it
+            // leaves the headphones taken, but `recoverIfOrphaned` below gives the output back and
+            // macOS reconnects them on its own.
+            log(
+                "stream: pid \(pid) did not stop; killing it (the output will be given back anyway)"
+            )
+            kill(pid, SIGKILL)
+            try? await Task.sleep(for: .milliseconds(500))
         }
         if installed && LaunchAgent.isLoaded() {
             log(
@@ -1823,6 +1891,8 @@ do {
                 "the CodecBlue device is still listed; if no stream is running, the driver hides it "
                     + "within half a second — if it stays, the headphones may still be taken")
         }
+    case ("probe-sco", 2):
+        try await probeSCO(arguments[1])
     case ("agent", 2...):
         // `agent install <address> [options]`, `agent remove`, `agent status`
         let action = arguments[1]
@@ -1853,6 +1923,45 @@ do {
 ///
 /// The address is optional when there is exactly one pair of headphones connected, which is the
 /// common case and the one where typing a MAC address adds nothing.
+/// A `codecblue system` process that is not the launchd job, if there is one.
+///
+/// `stop` unloads the job and asks the socket to quit, and both of those miss a stream started by
+/// hand: it has no plist to unload and, if it has already torn its socket down, nothing to answer.
+/// The process is the thing that holds the headphones, so the process is what has to be found.
+func strayStream() -> pid_t? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    process.arguments = ["-f", "codecblue system"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    let pids =
+        String(data: data, encoding: .utf8)?
+        .split(separator: "\n")
+        .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) } ?? []
+    // Not ourselves, and not the `pgrep` we just ran: `codecblue stop` does not match
+    // "codecblue system", but a shell that ran it might.
+    return pids.first { $0 != getpid() }
+}
+
+/// Sleeps, but wakes up when a stop is asked for. Returns true if it was.
+///
+/// `Task.sleep` cannot be interrupted by a signal, so a process in a sixty-second backoff ignores
+/// SIGTERM for up to a minute and looks hung. Sleeping in one-second slices costs nothing — the
+/// process is idle either way — and makes the stop immediate.
+func sleepUnlessStopping(_ seconds: TimeInterval, stopRequest: StopRequest) async -> Bool {
+    var left = seconds
+    while left > 0 {
+        if stopRequest.wasAsked { return true }
+        try? await Task.sleep(for: .milliseconds(250))
+        left -= 0.25
+    }
+    return stopRequest.wasAsked
+}
+
 func start(_ arguments: [String]) async throws {
     var address: String?
     var options: [String] = []
@@ -1935,6 +2044,118 @@ func start(_ arguments: [String]) async throws {
     log("it also starts at login from now on: launchd loads \(LaunchAgent.plistURL.path)")
     log("log: \(LaunchAgent.logPath)")
     log("to stop it and give the headphones back: codecblue stop")
+}
+
+/// Asks bluetoothd whether it will open a SCO channel, which is the whole question behind
+/// "microphone inside our own LDAC link".
+///
+/// The design note says SCO is not reachable through the XPC protocol this program uses: the table
+/// knows L2CAP (`openChannel`) and RFCOMM (`openRFCOMM`), and SCO is a synchronous transport that
+/// on this machine lives on a different unit of the converged hub. The alternative — going under
+/// `bluetoothd` to the Skywalk channels with SIP on — is weeks of work and two masters on one link.
+///
+/// So this is the cheap question that decides between days and weeks: does `openChannel` accept a
+/// `kCBMsgArgType` other than L2CAP, and if it does, what comes back? The key already exists in
+/// `XPCProtocol` (used today only for the check-in), so the probe costs one message.
+///
+/// It does not change anything: it opens a channel, reports what happened, and closes it. A refusal
+/// is the answer, not a failure.
+func probeSCO(_ address: String) async throws {
+    let session = ClassicXPCSession(label: "probe-sco")
+    try await session.start()
+    defer { session.invalidate() }
+    let record = try await session.lookup(address: address)
+    let device = record.uuid
+    log("device \(device) link=\(record.linkState)")
+    // The PSM is irrelevant to the question — SCO has no PSM, it has a channel — so the value is
+    // the one the spec uses for "no PSM" and the type is what is being tested. If bluetoothd
+    // validates the type before the PSM, the answer arrives; if it validates the PSM first, the
+    // refusal is about the PSM and says nothing about SCO, which is worth knowing too.
+    // macOS holds the AVDTP channel whenever its own audio profiles are up, and a channel that
+    // macOS holds is refused with 454 — measured, twice, with nothing of ours running. So the
+    // probe takes the same step the streamer takes: force macOS off the link first. It gives the
+    // headphones back at the end, so the only cost is the two seconds macOS needs to republish.
+    // The link has to be up first. A pair that macOS has just let go of is link=0, and a channel
+    // on a link that is not there is refused with 1804 ("no ACL link"), which says nothing about
+    // the type. So: ask macOS to connect, wait for the link, and only then force it off.
+    if record.linkState != 2 {
+        log("link is down (state \(record.linkState)): asking macOS to connect it first")
+        session.connect(device)
+        let deadline = Date().addingTimeInterval(12)
+        var up = false
+        while Date() < deadline {
+            if let now = try? await session.lookup(address: address), now.linkState == 2 {
+                up = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard up else {
+            log("the link did not come up: turn the headphones on and run this again")
+            exit(2)
+        }
+        log("link up")
+    }
+    // No forced disconnect here.
+    //
+    // It was tried, and it is what makes this probe unreliable: `cancelConnection(force:)` on a link
+    // that macOS established a second ago tears the whole link down, and the next channel is refused
+    // with 1804 ("no ACL link") — which says nothing about the type. The probe only needs AVDTP to
+    // be free, and that is a state to wait for, not a state to force. When macOS holds it the answer
+    // is 454 and the probe says so.
+
+    // The control, and it is the whole experiment.
+    //
+    // A refusal on `psm: 0` proves nothing about the type: bluetoothd may reject the *PSM* before it
+    // ever looks at `kCBMsgArgType`, and then the four refusals below would be about a number that
+    // was never valid rather than about SCO. So the first attempt is a real, working L2CAP channel
+    // (AVDTP, 0x0019) with no type at all. If that opens, the session and the device are fine and
+    // any later refusal is about what was changed. If it does not, the probe says nothing.
+    var control: OpenedChannel?
+    var lastError: Error?
+    for attempt in 0..<3 {
+        do {
+            control = try await session.openChannel(device, psm: 0x0019, timeout: 4)
+            break
+        } catch {
+            lastError = error
+            log("control attempt \(attempt + 1): \(error)")
+            try? await Task.sleep(for: .seconds(1))
+        }
+    }
+    do {
+        guard let control else { throw lastError ?? ClassicXPCError.timeout("control") }
+        log(
+            "control: L2CAP PSM 0x19 opened (fd \(control.fd), MTU \(control.outMTU)) — the session works"
+        )
+        close(control.fd)
+    } catch {
+        // 454 is "the headphones refused", and the note in `ChannelResult` says why: macOS is
+        // holding the channel. That is not a broken probe, it is a probe run at the wrong moment —
+        // the AVDTP channel is only free when CodecBlue itself is not streaming.
+        log("control: L2CAP PSM 0x19 was refused too (\(error))")
+        log("  → the probe cannot answer anything: the refusal is not about the type")
+        log("  → run it while no stream is running (macOS or CodecBlue may be holding AVDTP)")
+        exit(2)
+    }
+    for type in [Int64(0), 1, 2, 3] {
+        do {
+            let channel = try await session.openChannel(
+                device, psm: 0, timeout: 4, channelType: type)
+            log(
+                "type \(type): OPENED — fd \(channel.fd), cid \(channel.cid), MTU \(channel.outMTU)"
+            )
+            log("  → bluetoothd accepts a non-L2CAP type: the microphone inside our link is days")
+            close(channel.fd)
+            return
+        } catch {
+            log("type \(type): refused — \(error)")
+        }
+    }
+    log("every type was refused: SCO is not reachable through this protocol")
+    log("  → the microphone inside our link is the Skywalk work in the design note: weeks")
+    // Give the headphones back: the probe took the link to ask its question.
+    session.connect(device)
 }
 
 /// Why this pair cannot be driven, or `nil` if it can.

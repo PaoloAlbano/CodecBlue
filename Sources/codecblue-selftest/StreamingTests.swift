@@ -3072,3 +3072,257 @@ func duplicateCodecTests() {
         check(endpoints.allSatisfy(\.isSink), "all sinks")
     }
 }
+
+/// SCO is not reachable through the XPC protocol, and that is now a measurement.
+///
+/// The design note said so as a hypothesis and priced the alternative at weeks of Skywalk work. The
+/// probe settles it: with a control L2CAP channel opening on the same session, same device, same
+/// second (MTU 895), `openChannel` with any other `kCBMsgArgType` is rejected with result 3 — the
+/// message is invalid, not the headphones refusing (that is 454) and not macOS holding it (1803).
+func scoProbeTests() {
+    test("the probe has a control, or it proves nothing") {
+        // A refusal on a PSM that was never valid says nothing about the type: bluetoothd may
+        // reject the PSM before it reads `kCBMsgArgType`. The control is what makes the four
+        // refusals mean something, and it is the difference between a measurement and a guess.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let probe = body.range(of: "func probeSCO"),
+            let refusal = body.range(of: "func codecRefusal")
+        else {
+            check(false, "the probe must exist")
+            return
+        }
+        let block = String(body[probe.lowerBound..<refusal.lowerBound])
+        check(block.contains("psm: 0x0019"), "a real L2CAP channel is opened first")
+        check(block.contains("the session works"), "and it says so")
+        check(block.contains("exit(2)"), "and refuses to conclude anything without it")
+        check(block.contains("channelType: type"), "then the types are tried")
+    }
+
+    test("the result code is named, because 3 is not 454") {
+        check(ChannelResult.invalidRequest == 3, "invalid request")
+        check(ChannelResult.refusedNoResources == 454, "the headphones refused")
+        check(ChannelResult.alreadyConnected == 1803, "this session already asked")
+        check(ChannelResult.noLink == 1804, "no ACL link")
+    }
+
+    test("the probe does not tear the link down to free AVDTP") {
+        // Tried and removed: `cancelConnection(force:)` on a link macOS established a second ago
+        // makes the next channel fail with 1804, which says nothing about the type.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let probe = body.range(of: "func probeSCO"),
+            let refusal = body.range(of: "func codecRefusal")
+        else {
+            check(false, "the probe must exist")
+            return
+        }
+        let block = String(body[probe.lowerBound..<refusal.lowerBound])
+        // The comment above the code quotes the call on purpose, to explain why it is not there,
+        // so the check is on a call rather than on the word.
+        check(!block.contains("session.cancelConnection("), "no forced disconnect in the probe")
+    }
+}
+
+/// `stop` must stop a stream nobody started through launchd.
+///
+/// Measured 2026-11-09, twice: `codecblue system ADDR` started by hand kept the headphones and the
+/// system output while `stop` reported "stream: nothing running" — because it looked for a launchd
+/// job to unload and a socket to answer, and a hand-started stream has neither. Then the same
+/// process ignored SIGTERM for forty seconds, because `Task.sleep` cannot be interrupted by a
+/// signal and the backoff had grown to forty.
+func stopStrayStreamTests() {
+    test("stop looks for the process, not only for a job and a socket") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("func strayStream()"), "there is a search for it")
+        check(body.contains("kill(pid, SIGTERM)"), "and it is asked to stop")
+        check(
+            body.contains("the socket is stale (nothing answered)"),
+            "a socket nobody listens on is not evidence that nothing is running")
+    }
+
+    test("the wait for a headset is interruptible") {
+        // A sleep that ignores the stop request is a process that cannot be stopped: measured, the
+        // log said "asked to stop (SIGTERM): stopping" and the process slept on for forty seconds.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("func sleepUnlessStopping"), "the wait is in slices")
+        check(body.contains("stopRequest.wasAsked"), "and it checks the request between them")
+        check(
+            !body.contains("try? await Task.sleep(for: .seconds(backoff))"),
+            "the uninterruptible sleep is gone")
+    }
+}
+
+/// "HQ 990 kbps" on a link carrying 303 is the bug that was reported twice.
+///
+/// Reported 2026-11-09, the second time with "I thought I had been clear". It was clear, and the
+/// code was reading `link_ceiling` alone — which is 0 until a window actually loses audio, and on a
+/// healthy stream that never happens. So `capacity` stayed 0, `wouldUse` returned nil, and the label
+/// fell back to the rung's nominal 990 while the stream was playing 303. A number that is wrong on
+/// every healthy stream is not a conservative default, it is a wrong default.
+func capacityFallbackTests() {
+    test("no ceiling does not mean no measurement") {
+        // The rule the menu now follows: the ceiling decides what fits, the floor is still a fact
+        // about this link, and display uses whichever exists.
+        let floorOnly = QualityLevels.describe(capacityKbps: 312, sampleRate: 44100)
+        let hq = floorOnly[0]
+        let label = QualityLevels.menuLabel(
+            hq, capacityKbps: 312, streaming: true, cappedByCeiling: false)
+        check(!label.contains("990"), "HQ cannot say 990 on a 312 kbps link: \(label)")
+        check(label.contains("330") || label.contains("303"), "it says what it gives: \(label)")
+        check(
+            label.contains("has carried"), "and it does not claim the link cannot do more: \(label)"
+        )
+    }
+
+    test("a ceiling is allowed to say 'capped', a floor is not") {
+        let levels = QualityLevels.describe(capacityKbps: 312, sampleRate: 44100)
+        let withCeiling = QualityLevels.menuLabel(
+            levels[0], capacityKbps: 312, streaming: true, cappedByCeiling: true)
+        check(
+            withCeiling.contains("capped"), "a window that lost audio is evidence: \(withCeiling)")
+        let withFloor = QualityLevels.menuLabel(
+            levels[0], capacityKbps: 312, streaming: true, cappedByCeiling: false)
+        check(!withFloor.contains("capped"), "a floor is not: \(withFloor)")
+    }
+
+    test("the menu reads the floor when the ceiling is missing") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("linkKbps = ceiling > 0 ? ceiling : floor"), "the fallback is explicit")
+        check(body.contains("linkIsCeiling = ceiling > 0"), "and the distinction is kept")
+    }
+}
+
+/// The report window is a measurement parameter, and it was fixed at 2 s until it was asked for.
+///
+/// Asked 2026-11-10: "measure it on a smaller window". The answer turned out to be that a smaller
+/// window measures noise rather than the link — the same link gave 343 and 441 kbps in two
+/// consecutive 500 ms windows, against 403 and 403 at 2 s — but the question could not even be
+/// asked before, because the interval was not reachable from the command line. The measurement
+/// lives in `notes/findings/2026-11-10-ceiling-window.md`; this keeps the option from being lost.
+func reportWindowTests() {
+    test("the report window can be set from the command line") {
+        let source = try? String(
+            contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("case \"--report-ms\":"), "the option is parsed")
+        check(
+            body.contains("streamer.reportInterval = reportMilliseconds / 1000"),
+            "and reaches the streamer, in seconds")
+        // The first three windows are shorter than the rest so that a bad start shows up early.
+        // With an interval asked for, they would be shorter still and measure nothing at all.
+        check(
+            body.contains("streamer.firstReports = 0"),
+            "the short warm-up windows are turned off, or they would measure nothing")
+    }
+
+    test("a smaller window is noisier, which is why 2 s is the default") {
+        // The numbers from the measurement, kept as a check on the claim rather than as a table
+        // to trust: two runs at each size, HQ forced so that every window is saturated.
+        let measured: [(window: Int, runs: [Double])] = [
+            (500, [343, 441]), (1000, [350, 398]), (2000, [403, 403]), (4000, [357, 374]),
+        ]
+        func spread(_ runs: [Double]) -> Double {
+            guard let low = runs.min(), let high = runs.max(), low > 0 else { return 0 }
+            return high / low
+        }
+        let at500 = spread(measured[0].runs)
+        let at2000 = spread(measured[2].runs)
+        check(at500 > 1.2, "500 ms windows disagree with each other: \(at500)")
+        check(at2000 < 1.05, "2 s windows agree: \(at2000)")
+    }
+}
+
+/// A build that failed must not produce a bundle, and this is the check that would have caught it.
+///
+/// Measured 2026-11-10, twice in one afternoon: the menu installed at 12:11 had md5 3f9c175 while
+/// the source had been fixed at 12:23, so an hour of fixes was invisible while the icon was
+/// restarted and reported as updated. The cause was `swift build | grep ... || true`: the pipe made
+/// the exit status grep's, the `|| true` discarded it, and the guard that followed checked for the
+/// *previous* build's binary. The script now captures the output, and `install.sh` compares the md5
+/// of what was installed against what was built.
+func menuBuildTests() {
+    test("a failed menu build stops the packaging script") {
+        let source = try? String(
+            contentsOfFile: "scripts/build-menu-app.sh", encoding: .utf8)
+        let body = source ?? ""
+        check(
+            body.contains("build_log=$(swift build --product CodecBlueMenu 2>&1) ||"),
+            "the build's own exit status is used, not grep's")
+        check(
+            !body.contains("swift build --product CodecBlueMenu 2>&1 | grep"),
+            "and it is not piped into grep, which would replace that status")
+        check(
+            body.contains("nothing was packaged"),
+            "and a failure says that nothing was written")
+    }
+
+    test("install.sh compares what it installed against what it built") {
+        let source = try? String(contentsOfFile: "scripts/install.sh", encoding: .utf8)
+        let body = source ?? ""
+        check(
+            body.contains("md5 -q \"$MENU_APP/Contents/MacOS/CodecBlueMenu\""),
+            "the built bundle is hashed")
+        check(
+            body.contains("md5 -q \"$APP_DIR/CodecBlue.app/Contents/MacOS/CodecBlueMenu\""),
+            "the installed one is hashed")
+        check(body.contains("is not the one just built"), "and a difference is an error")
+    }
+}
+
+/// The driver's clock must follow the device's rate, and it did not.
+///
+/// Reported 2026-11-10 as "it crackles". `hostTicksPerFrame` was computed once, in
+/// `driver_Initialize`, on the line *before* `ring_open()` — so `ring_sample_rate()` saw
+/// `gRing == NULL`, returned the 48000 default, and the clock stayed at 48 kHz while the device
+/// played 44.1. The driver then produced 48 000 frames per second of a device that consumes
+/// 44 100, and the surplus went into the ring: it filled to exactly 48 000 frames (1088 ms, its
+/// whole capacity) in about 12 s and wrapped on every write from then on. Continuous crackle, with
+/// `skips 0` and every other number healthy.
+///
+/// These checks are on the source because the arithmetic is in C and the failure is an ordering
+/// one: a cached value computed before the thing it depends on exists.
+func driverClockTests() {
+    let source = try? String(
+        contentsOfFile: "Driver/CodecBlueDriver/CodecBlueDriver.c", encoding: .utf8)
+    let body = source ?? ""
+
+    test("the clock is a function of the rate, not a value cached at startup") {
+        check(
+            body.contains("static double host_ticks_per_frame(double rate)"),
+            "it takes the rate as an argument")
+        check(
+            !body.contains("hostTicksPerFrame"),
+            "and no cached copy of it survives in the driver state")
+    }
+
+    test("the clock is read from the ring's rate where it is used") {
+        check(
+            body.contains("host_ticks_per_frame(ring_sample_rate())"),
+            "GetZeroTimeStamp asks for the current rate")
+        // The ordering bug was a *call* in Initialize, before `ring_open()`: the rate read there
+        // was the default, not the device's. Comments mention the function by name, so count call
+        // sites rather than searching for the text — definition plus the one use in GetZeroTimeStamp.
+        let calls = body.components(separatedBy: "host_ticks_per_frame(").count - 1
+        check(calls == 2, "one definition and one call site, not a third in Initialize: \(calls)")
+        let initialize =
+            body.components(separatedBy: "static OSStatus driver_Initialize").last ?? ""
+        let upToRingOpen = initialize.components(separatedBy: "ring_open();").first ?? ""
+        check(
+            !upToRingOpen.contains("host_ticks_per_frame("),
+            "Initialize does not call it before the ring is open")
+    }
+
+    test("the surplus the bug produced is the measured one") {
+        // 48 000 frames/s into a 44 100 Hz device: 3 900 frames/s of surplus, and 48 000 / 3 900
+        // = 12.3 s to fill a ring of 48 000 frames. Measured: ~3 300 frames/s and 1088 ms.
+        let surplus = 48000.0 - 44100.0
+        let secondsToFill = 48000.0 / surplus
+        check(abs(secondsToFill - 12.3) < 0.1, "\(secondsToFill) s to fill the ring")
+        check(abs(48000.0 / 44100.0 - 1.088) < 0.001, "and the ring holds 1088 ms")
+    }
+}

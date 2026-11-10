@@ -174,7 +174,6 @@ typedef struct {
     UInt32                              started;
     UInt64                              hostTimeAnchor;
     UInt64                              frameAnchor;
-    double                              hostTicksPerFrame;
     /// 0…1, applied to every sample the host writes. The driver had no volume control at all,
     /// so the system volume keys and the slider did nothing: the PCM went through untouched.
     _Atomic uint32_t                    volumeBits;   // Float32 bit pattern, atomic
@@ -301,11 +300,29 @@ static void trace(const char* what) {
 
 #pragma mark - Helpers
 
-static double host_ticks_per_frame(void) {
+/// Host ticks per audio frame, at `rate`.
+///
+/// A *function of the rate*, not a value cached at Initialize, and that distinction is a bug that
+/// was heard before it was found. It used to be computed once, in `driver_Initialize`, on the line
+/// *before* `ring_open()` — so `ring_sample_rate()` saw `gRing == NULL`, returned the 48000 default,
+/// and the clock stayed at 48 kHz for the life of the process. With the device then set to 44.1 kHz
+/// the driver produced 48 000 frames per second of a device that plays 44 100, and the surplus had
+/// nowhere to go but into the ring.
+///
+/// Measured 2026-11-10, reported as "it crackles": the ring filled to exactly 48 000 frames
+/// (1088 ms, its whole capacity) in about 12 s, then wrapped on every write. The reader kept
+/// consuming at 44 100, so the audio it took was a mixture of the newest samples and whatever the
+/// writer had just overwritten — heard as continuous crackle, with `skips 0` and every other number
+/// in the report looking healthy. The arithmetic is exact: 48 000 − 44 100 = 3 900 frames/s of
+/// surplus, against ~3 300 measured, and 48 000 / 3 900 = 12.3 s to fill.
+///
+/// The comment on `ring_sample_rate` already said "a format at 44.1 with a clock at 48 would play
+/// everything 8.8% fast". It was right, and nothing enforced it.
+static double host_ticks_per_frame(double rate) {
     mach_timebase_info_data_t timebase;
     mach_timebase_info(&timebase);
     double ticksPerSecond = 1e9 * (double)timebase.denom / (double)timebase.numer;
-    return ticksPerSecond / ring_sample_rate();
+    return ticksPerSecond / rate;
 }
 
 #pragma mark - Interface: COM
@@ -339,7 +356,8 @@ static ULONG driver_Release(void* inDriver) {
 static OSStatus driver_Initialize(AudioServerPlugInDriverRef inDriver,
                                   AudioServerPlugInHostRef inHost) {
     gDriver.host = inHost;
-    gDriver.hostTicksPerFrame = host_ticks_per_frame();
+    // No clock is computed here on purpose: see `host_ticks_per_frame`. Reading the rate before
+    // `ring_open()` below would read the default, not the device's.
     {
         // Full scale unless a value was saved: see volume_load.
         Float32 full = 1.0f; uint32_t bits; memcpy(&bits, &full, sizeof(bits));
@@ -944,14 +962,17 @@ static OSStatus driver_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, Aud
     // (which is what this did first) makes the clock look invalid, and the host then never calls
     // DoIOOperation at all — StartIO succeeds, the device says it is running, and no audio ever
     // arrives.
+    // Read the rate here, every time, rather than from a value cached at Initialize: the rate can
+    // change (`codecblue rate 44100` writes it into the ring), and a clock that disagrees with the
+    // declared format is what made the ring overflow. See `host_ticks_per_frame`.
+    double ticksPerFrame = host_ticks_per_frame(ring_sample_rate());
     UInt64 now = mach_absolute_time();
     UInt64 elapsedTicks = now - gDriver.hostTimeAnchor;
-    UInt64 frames = (UInt64)((double)elapsedTicks / gDriver.hostTicksPerFrame);
+    UInt64 frames = (UInt64)((double)elapsedTicks / ticksPerFrame);
     UInt64 periods = frames / kZeroTimeStampPeriod;
     UInt64 sampleTime = periods * kZeroTimeStampPeriod;
     *outSampleTime = (Float64)sampleTime;
-    *outHostTime = gDriver.hostTimeAnchor
-                 + (UInt64)((double)sampleTime * gDriver.hostTicksPerFrame);
+    *outHostTime = gDriver.hostTimeAnchor + (UInt64)((double)sampleTime * ticksPerFrame);
     *outSeed = 1;
     return kAudioHardwareNoError;
 }

@@ -86,6 +86,24 @@ cp .build/debug/codecblue-keys "$APP_DIR/CodecBlue.app/Contents/MacOS/codecblue-
 # Ad-hoc, with the identifier as the designated requirement: `scripts/sign.sh` explains why that
 # matters — a cdhash requirement would forget the Accessibility permission at the next update.
 sh "$HERE/scripts/sign.sh" "$APP_DIR/CodecBlue.app" com.codecblue.menu 2>/dev/null || true
+
+# Check that what was installed is what was just built, before saying it is installed.
+#
+# Added 2026-11-10, after it happened twice in one afternoon: the menu installed at 12:11 had md5
+# 3f9c175 while the one built at 12:23 had 0191c29, so every fix of that hour was invisible and the
+# icon was restarted without anyone checking. The cause is that `build-menu-app.sh` may return an
+# older bundle than the one just built, and nothing compared the two. A copy is not an install
+# until it is the same bytes.
+built=$(md5 -q "$MENU_APP/Contents/MacOS/CodecBlueMenu" 2>/dev/null)
+installed=$(md5 -q "$APP_DIR/CodecBlue.app/Contents/MacOS/CodecBlueMenu" 2>/dev/null)
+if [ -z "$built" ] || [ "$built" != "$installed" ]; then
+    echo "error: the installed menu bar app is not the one just built" >&2
+    echo "  built:     $MENU_APP  ${built:-missing}" >&2
+    echo "  installed: $APP_DIR/CodecBlue.app  ${installed:-missing}" >&2
+    echo "  the copy did not take, or build-menu-app.sh returned a stale bundle" >&2
+    exit 1
+fi
+echo "   menu bar app: md5 $installed (matches the build)"
 echo "   $APP_DIR/codecblue"
 echo "   $APP_DIR/codecblue-keys"
 echo "   $APP_DIR/CodecBlue.app"

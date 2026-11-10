@@ -140,7 +140,8 @@ public enum QualityLevels {
     /// which is the only thing that distinguishes them. The tick says which one the stream would
     /// pick here, so the menu answers "what will I get?" and not just "what exists?".
     public static func menuLabel(
-        _ level: Level, capacityKbps: Double, streaming: Bool = false, playingKbps: Int? = nil
+        _ level: Level, capacityKbps: Double, streaming: Bool = false, playingKbps: Int? = nil,
+        cappedByCeiling: Bool = true
     ) -> String {
         // The number shown is what the listener will *get*, not what the rung asks for.
         //
@@ -152,6 +153,12 @@ public enum QualityLevels {
         // A level is a ceiling, so what it produces here is `wouldUse` — the highest rung at or
         // below it that this link carries. When nothing has been measured there is no "here", and
         // the label falls back to the codec's own number, labelled as such.
+        //
+        // "Measured" includes the floor. Reported 2026-11-09, twice, the second time with "I
+        // thought I had been clear": the menu read `link_ceiling` alone, which is 0 until a window
+        // loses audio — so on every healthy stream the capacity was 0 and the label said 990 while
+        // 303 was playing. The caller now passes the floor when there is no ceiling, and
+        // `cappedByCeiling` says which one it was, because the two support different sentences.
         let effective = wouldUse(level, capacityKbps: capacityKbps)
         let number = effective ?? level.nominalKbps
 
@@ -191,7 +198,12 @@ public enum QualityLevels {
         if capacityKbps > 0, effective != nil, effective != level.nominalKbps {
             // Said once, at the end, and only when the two differ: "High · 330 kbps" on its own
             // would look like a typo to anyone who knows HQ is 990.
-            text += " · capped by this link"
+            //
+            // "capped" only when the number came from a *ceiling* — a window that lost audio, the
+            // only evidence that something does not fit. When it came from the floor, the honest
+            // word is "has carried": the link has never been asked for more, so saying it cannot
+            // do more would be a guess, and the guess is exactly what `link_floor` exists to avoid.
+            text += cappedByCeiling ? " · capped by this link" : " · this link has carried less"
         }
         if capacityKbps <= 0 { return text }
         if level.chosen { text = "✓ " + text }

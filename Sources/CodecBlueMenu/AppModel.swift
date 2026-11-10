@@ -58,6 +58,13 @@ final class AppModel: ObservableObject {
     /// claim HQ "gives 330 here" on a link that has never been asked to try — measured 2026-11-09,
     /// and the first version of this did exactly that.
     @Published private(set) var linkFloorKbps = 0.0
+
+    /// Whether `linkKbps` came from a ceiling (a window that lost audio) or from the floor.
+    ///
+    /// The distinction is the difference between "this does not fit" and "this is what the link has
+    /// carried so far", and the menu says one or the other. Collapsing them into one number is what
+    /// produced "HQ 990 kbps" on a link carrying 303.
+    @Published private(set) var linkIsCeiling = false
     /// The rate the stream is encoding at, which decides what the three levels are worth: at
     /// 44.1 kHz they are 909 / 606 / 303, not 990 / 660 / 330.
     @Published private(set) var streamRate = 48000
@@ -241,7 +248,24 @@ final class AppModel: ObservableObject {
         latencyMilliseconds = Int(values["latency_ms"] ?? "0") ?? 0
         skips = values["skips"] ?? "—"
         linkQuality = values["link_quality"] ?? "unknown"
-        linkKbps = Double(values["link_ceiling"] ?? "0") ?? 0
+        // The ceiling decides what fits; when there is no ceiling yet, the floor is still a fact
+        // about this link and must be shown instead of the codec's own number.
+        //
+        // Reported 2026-11-09, twice: "I still see HQ at 990 kbps, I thought I had been clear".
+        // It was clear, and the code was reading `link_ceiling` alone — which is 0 until a window
+        // actually loses audio, and on a healthy stream that never happens. So `capacity` stayed 0,
+        // `wouldUse` returned nil, and the label fell back to the rung's nominal 990 while the
+        // stream was playing 303. A number that is wrong on every healthy stream is not a
+        // conservative default, it is a wrong default.
+        //
+        // The two numbers keep their different meanings: `link_ceiling` is the only thing allowed
+        // to say "this does not fit", and `link_floor` is what the link has demonstrably carried.
+        // For *display* the floor is the better of the two when the ceiling is missing, because it
+        // is measured rather than assumed, and `QualityLevels` says which one it used.
+        let ceiling = Double(values["link_ceiling"] ?? "0") ?? 0
+        let floor = Double(values["link_floor"] ?? "0") ?? 0
+        linkIsCeiling = ceiling > 0
+        linkKbps = ceiling > 0 ? ceiling : floor
         linkFloorKbps = Double(values["link_floor"] ?? "0") ?? 0
         streamRate = Int(values["sample_rate"] ?? "48000") ?? 48000
         note = nil

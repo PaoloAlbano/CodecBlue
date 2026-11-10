@@ -24,7 +24,22 @@ if [ -d "$APP" ] && [ ! -w "$APP" ]; then
 fi
 
 echo "building…"
-swift build --product CodecBlueMenu 2>&1 | grep -E "error:|warning: " || true
+# A failed build must stop here, and it did not.
+#
+# This line used to be `swift build ... | grep -E "error:|warning: " || true`, which has two
+# faults that hid each other: the `|| true` swallowed the failure, and the `[ ! -x "$BINARY" ]`
+# check below then passed on the *previous* build's binary. So a compile error produced a bundle
+# that looked freshly built and contained yesterday's code. Measured 2026-11-10: the menu installed
+# at 12:11 had md5 3f9c175 while the source had been fixed at 12:23, and every fix of that hour was
+# invisible while the icon was restarted and reported as updated.
+#
+# The output is captured rather than piped, so the exit status is `swift build`'s own.
+build_log=$(swift build --product CodecBlueMenu 2>&1) || {
+    echo "$build_log" | grep -E "error:" >&2 || echo "$build_log" >&2
+    echo "error: the menu bar app did not build; nothing was packaged" >&2
+    exit 1
+}
+echo "$build_log" | grep -E "warning: " || true
 
 if [ ! -x "$BINARY" ]; then
     echo "error: $BINARY was not built" >&2

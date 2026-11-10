@@ -132,7 +132,8 @@ struct ContentView: View {
                             + QualityLevels.menuLabel(
                                 level, capacityKbps: model.linkKbps,
                                 streaming: model.isStreaming,
-                                playingKbps: playing ? model.playingKbps : nil))
+                                playingKbps: playing ? model.playingKbps : nil,
+                                cappedByCeiling: model.linkIsCeiling))
                 }
             }
             Divider()
