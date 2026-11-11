@@ -165,6 +165,27 @@ public enum LaunchAgent {
         try? FileManager.default.removeItem(at: plistURL)
     }
 
+    /// The `--capacity` already written into the plist, or nil.
+    ///
+    /// Read back so that a setting the menu rewrites does not silently drop a measurement it did not
+    /// choose. `rememberQuality` rebuilds the whole argument list from the values the menu holds,
+    /// and the capacity is not one of them — it was measured once by `codecblue flood` and belongs
+    /// to the machine, not to the menu. Without this, changing the level would erase it and the menu
+    /// would go back to learning the ceiling by dropping audio, which is heard as crackle.
+    public static func knownCapacityKbps() -> Int? {
+        guard let text = try? String(contentsOf: plistURL, encoding: .utf8),
+            let range = text.range(of: "<string>--capacity</string>")
+        else { return nil }
+        // The value is the next <string> after the flag. Parsing the XML properly would mean
+        // PropertyListSerialization and a dictionary walk; the file is written by `plist(…)` in this
+        // same type, so the shape is known.
+        let rest = text[range.upperBound...]
+        guard let open = rest.range(of: "<string>"),
+            let close = rest.range(of: "</string>", range: open.upperBound..<rest.endIndex)
+        else { return nil }
+        return Int(rest[open.upperBound..<close.lowerBound])
+    }
+
     /// Whether the plist is on disk, which is what decides whether the next login starts us.
     public static func isInstalled() -> Bool {
         FileManager.default.fileExists(atPath: plistURL.path)

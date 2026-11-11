@@ -3600,3 +3600,60 @@ func knownCapacityTests() {
         check(runs.max()! / runs.min()! < 1.15, "and the runs agree within 15%")
     }
 }
+
+/// A measurement the menu did not make must survive the menu rewriting the plist.
+///
+/// `rememberQuality` rebuilds the whole argument list from the values the model holds — level,
+/// adapt, cushion — and the capacity is not one of them: it was measured once by `codecblue flood`
+/// and belongs to the machine. Rebuilding without it would erase the measurement on the first level
+/// change, and the menu would go back to learning the ceiling by dropping audio, which is the
+/// crackle this whole day was about.
+func capacitySurvivesRewriteTests() {
+    test("the menu reads the capacity back before rewriting the plist") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        let body = source ?? ""
+        let passes =
+            body.components(separatedBy: "capacityKbps: LaunchAgent.knownCapacityKbps()")
+            .count - 1
+        check(passes == 2, "both places that write the plist carry it: \(passes)")
+    }
+
+    test("reading the real plist back gives the number written into it") {
+        // Only when there is a plist: this runs on a developer's machine, and a check that fails
+        // because nothing is installed would be a check nobody keeps.
+        guard LaunchAgent.isInstalled() else { return }
+        let read = LaunchAgent.knownCapacityKbps()
+        check(
+            read == nil || (read ?? 0) > 0,
+            "either absent or a real measurement: \(String(describing: read))")
+        // And the round trip: what the reader returns, written back, is still there.
+        if let read {
+            let rebuilt = LaunchAgent.arguments(
+                quality: "4", adapt: true, cushionMilliseconds: 60, capacityKbps: read)
+            check(rebuilt.contains(String(read)), "the value survives a rebuild: \(rebuilt)")
+        }
+    }
+
+    test("the plist can be asked what capacity it holds") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("public static func knownCapacityKbps() -> Int?"), "the reader exists")
+        check(body.contains("<string>--capacity</string>"), "and it looks for the flag")
+    }
+
+    test("the argument builder emits the flag only when there is one") {
+        // `--capacity 0` would be a ceiling of zero, which is not "unknown" — it is a link that
+        // carries nothing. Absent is the honest way to say nothing was measured.
+        let with = LaunchAgent.arguments(
+            quality: "4", adapt: true, cushionMilliseconds: 60, capacityKbps: 485)
+        check(with.contains("--capacity") && with.contains("485"), "\(with)")
+        let without = LaunchAgent.arguments(
+            quality: "4", adapt: true, cushionMilliseconds: 60, capacityKbps: nil)
+        check(!without.contains("--capacity"), "no measurement, no flag: \(without)")
+        let zero = LaunchAgent.arguments(
+            quality: "4", adapt: true, cushionMilliseconds: 60, capacityKbps: 0)
+        check(!zero.contains("--capacity"), "and zero is not a measurement: \(zero)")
+    }
+}

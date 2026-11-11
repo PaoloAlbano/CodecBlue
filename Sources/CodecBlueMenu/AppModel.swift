@@ -381,7 +381,12 @@ final class AppModel: ObservableObject {
                 address: address,
                 arguments: LaunchAgent.arguments(
                     quality: Self.level(level), adapt: adapt,
-                    cushionMilliseconds: cushionMilliseconds))
+                    cushionMilliseconds: cushionMilliseconds,
+                    // Carried through, not re-chosen: the capacity was measured at rest by
+                    // `codecblue flood` and belongs to the machine. Rebuilding the argument list
+                    // without it would erase the measurement on the first level change, and the
+                    // menu would go back to learning the ceiling by dropping audio.
+                    capacityKbps: LaunchAgent.knownCapacityKbps()))
         } catch {
             note = "could not remember the setting: \(error.localizedDescription)"
         }
@@ -434,7 +439,8 @@ final class AppModel: ObservableObject {
                 address: address,
                 arguments: LaunchAgent.arguments(
                     quality: Self.level(quality), adapt: adapt,
-                    cushionMilliseconds: cushionMilliseconds))
+                    cushionMilliseconds: cushionMilliseconds,
+                    capacityKbps: LaunchAgent.knownCapacityKbps()))
             try LaunchAgent.load()
             note = nil
         } catch {
