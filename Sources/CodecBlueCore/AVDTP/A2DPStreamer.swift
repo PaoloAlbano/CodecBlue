@@ -252,6 +252,27 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// taken without consuming the meter that `report()` needs.
     private var meterReportedFrames = 0
 
+    /// A ceiling measured at rest — by `codecblue flood` — and passed in by the caller.
+    ///
+    /// It seeds `currentCarriedKbps`, so the menu can answer "does HQ fit here?" before any audio
+    /// has flowed. Without it the answer is unknown until something drops, and finding out by
+    /// dropping is heard as crackle: a level above the link's capacity throws away 30-50% of the
+    /// audio, which is the sound this whole program exists to avoid.
+    ///
+    /// It is a starting point, not a verdict: a window that loses audio still lowers the ceiling,
+    /// and the floor still raises what is reported. The measurement at rest is the only one that
+    /// costs nothing audible, so it is the one worth making first.
+    public var knownCapacityKbps: Double = 0 {
+        didSet {
+            // Seeded, not merely stored. `currentCarriedKbps` is what the menu reads as the ceiling
+            // and it is 0 until a window loses audio, so setting it here is what lets the menu
+            // answer before the first note instead of after the first crackle.
+            if knownCapacityKbps > 0, currentCarriedKbps <= 0 {
+                currentCarriedKbps = knownCapacityKbps
+            }
+        }
+    }
+
     /// The most the link has carried in a window that dropped nothing, in kbit/s.
     ///
     /// A *lower bound* on the capacity, not the capacity. The stream is paced to real time, so a
@@ -947,7 +968,25 @@ public final class A2DPStreamer: @unchecked Sendable {
                 }
                 if let requested = requestedCushion {
                     requestedCushion = nil
-                    queue.retune(floor: requested, ceiling: max(queueCeiling, requested))
+                    // The chosen cushion is the ceiling as well as the floor, and it was only the
+                    // floor.
+                    //
+                    // Reported 2026-11-11: "I selected a different latency but the selection does
+                    // not work, it does not change". It changed, and then changed back on its own:
+                    // `cushion 100` logged "100 ms by request", the next stall logged "widened to
+                    // 200 ms", and the latency went from 198 to 302 ms. The chosen number was a
+                    // starting point, not a setting.
+                    //
+                    // That is the wrong way round for a menu that offers "30 ms — tightest" and
+                    // "150 ms — steadiest". Someone who picks the tightest one is saying they
+                    // accept the risk of a stall in exchange for the latency; growing to 200 ms
+                    // anyway takes the latency and gives back nothing they asked for.
+                    //
+                    // So the choice now bounds the automatic growth: the cushion may still shrink
+                    // back towards the floor, but it cannot climb past what was chosen. A stall
+                    // that needs more than that is absorbed by dropping audio, which is the trade
+                    // the person made by choosing it.
+                    queue.retune(floor: requested, ceiling: requested)
                     // The ring's stale-audio budget is derived from the cushion, so it has to
                     // follow through the same callback the adaptation uses — otherwise the two
                     // numbers describing one thing would disagree, which is how the earlier

@@ -123,7 +123,7 @@ func usage() -> Never {
                    codecblue play   XX:XX:XX:XX:XX:XX [FILE.wav] [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
                                     [--media-priority N] [--media-mtu N|0] [--sndbuf-packets N]
                                     [--no-hfp] [--no-avrcp] [--low-latency] [--keep-link-quality] [--adapt] [--gain X]
-                                    [--report-ms N]
+                                    [--report-ms N] [--capacity KBPS]
                    codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
                                     (plays the CodecBlue virtual device)
                    codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
@@ -268,6 +268,8 @@ func play(_ address: String, _ options: [String]) async throws {
     // "what does this link average" but "what is the worst two seconds it has", and the second
     // question is the one a margin has to answer.
     var reportMilliseconds = 0.0
+    /// A ceiling measured at rest and passed in, so the menu knows it before audio flows.
+    var knownCapacityKbps = 0.0
     var rest = options[...]
     while let option = rest.popFirst() {
         switch option {
@@ -280,6 +282,16 @@ func play(_ address: String, _ options: [String]) async throws {
                 usage()
             }
             queueDuration = ms / 1000
+        case "--capacity":
+            // A ceiling measured at rest, by `codecblue flood`, and remembered in the plist.
+            //
+            // A *starting* ceiling, not a permanent one: a window that loses audio still lowers it,
+            // and the floor still raises what the menu reports. What it buys is that the menu knows
+            // the answer before the first note, instead of learning it by playing a level the link
+            // cannot carry — which is heard as crackle.
+            guard let value = rest.popFirst(), let kbps = Double(value), kbps > 0, kbps <= 2000
+            else { usage() }
+            knownCapacityKbps = kbps
         case "--media-priority":
             guard let value = rest.popFirst(), let priority = Int64(value), priority >= 0 else {
                 usage()
@@ -377,6 +389,7 @@ func play(_ address: String, _ options: [String]) async throws {
         streamer.mediaMTU = mediaMTU
         streamer.sendBufferPackets = sendBufferPackets
         streamer.adaptBitrate = adaptBitrate
+        if knownCapacityKbps > 0 { streamer.knownCapacityKbps = knownCapacityKbps }
         if reportMilliseconds > 0 {
             streamer.reportInterval = reportMilliseconds / 1000
             // The first three windows are deliberately short so a bad start shows up early; with a
@@ -609,6 +622,8 @@ func playSystemSession(
     // How the headphones go back to macOS when the stream ends.
     var handBackStyle: HeadsetTakeover.HandBackStyle = .reconnect
     var handBackWait = 3.0
+    /// A ceiling measured at rest, from `--capacity`. Same meaning as in `play`.
+    var knownCapacityKbps = 0.0
     var rest = options[...]
     while let option = rest.popFirst() {
         switch option {
@@ -621,6 +636,13 @@ func playSystemSession(
                 usage()
             }
             queueDuration = ms / 1000
+        case "--capacity":
+            // The same option as `play`, and it has to exist in both parsers: `system` is the one
+            // `start` and the login item use, and an option that only one of them accepts is a
+            // setting that works until the agent restarts itself.
+            guard let value = rest.popFirst(), let kbps = Double(value), kbps > 0, kbps <= 2000
+            else { usage() }
+            knownCapacityKbps = kbps
         case "--sndbuf-packets":
             guard let value = rest.popFirst(), let packets = Int(value), packets >= 1, packets <= 64
             else { usage() }
@@ -799,6 +821,9 @@ func playSystemSession(
     streamer.queueDuration = queueDuration
     streamer.queueCeiling = queueDuration + 0.25
     streamer.driftPPM = driftPPM
+    // A ceiling measured at rest, so the menu can answer "does HQ fit here?" before the first note
+    // instead of after the first crackle. See `A2DPStreamer.knownCapacityKbps`.
+    if knownCapacityKbps > 0 { streamer.knownCapacityKbps = knownCapacityKbps }
     // The headphones' own volume buttons. They arrive as AVRCP PASS THROUGH, and until now they
     // were only written to the log — so pressing them did nothing, which is what the listener
     // reported. Three notches per press: one is too little to feel, and the headphones send one
@@ -1731,7 +1756,10 @@ do {
         }
         for level in QualityLevels.describe(capacityKbps: capacity, sampleRate: rate) {
             print(
-                (level.chosen ? "✓ " : "  ") + QualityLevels.label(level, capacityKbps: capacity)
+                // The tick is drawn here, not inside `label`: `codecblue levels` answers "which rung
+                // would fit this link", which is `chosen`, and that is the only question it asks.
+                (level.chosen ? "✓ " : "  ")
+                    + QualityLevels.label(level, capacityKbps: capacity, sampleRate: rate)
                     + "  (rung \(level.rung))")
         }
     case ("compare", 1):

@@ -100,14 +100,27 @@ public enum LaunchAgent {
     /// cannot carry it, so a pinned level no longer implies `--no-adapt`: the adapter is what
     /// makes the ceiling safe. `--no-adapt` is written only when the listener turned the adapter
     /// off on purpose.
-    public static func arguments(quality: String?, adapt: Bool, cushionMilliseconds: Int?)
-        -> [String]
-    {
+    public static func arguments(
+        quality: String?, adapt: Bool, cushionMilliseconds: Int?, capacityKbps: Int? = nil
+    ) -> [String] {
         var out: [String] = []
         if let quality { out += ["--quality", quality] }
         if !adapt { out += ["--no-adapt"] }
         if let cushionMilliseconds, cushionMilliseconds > 0 {
             out += ["--queue-ms", String(cushionMilliseconds)]
+        }
+        // A ceiling measured once, at rest, and remembered.
+        //
+        // The alternative is a probe during playback, and a probe is not free: a level change makes
+        // the encoder produce a different frame size, so the queued packets — both stale and the
+        // wrong shape — are dropped, which is a hole of 30-60 ms, and the higher level then drops
+        // 40% of the audio for a second or two before settling back. Measured 2026-11-07 and
+        // 2026-11-08, and the second measurement is why the old time-expiring block was removed.
+        //
+        // `codecblue flood` measures the same thing with no audio at all in 15 seconds, so the
+        // number can be known before the first note instead of guessed during it.
+        if let capacityKbps, capacityKbps > 0 {
+            out += ["--capacity", String(capacityKbps)]
         }
         return out
     }

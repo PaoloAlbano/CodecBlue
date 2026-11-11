@@ -82,6 +82,25 @@ final class AppModel: ObservableObject {
     /// enough to be clicked. A status line that is two seconds stale is invisible; a menu that
     /// closes under the pointer is not.
     private var menuIsOpen = false
+    /// When the menu was last seen opening, so a latch that never cleared can be noticed.
+    private var menuOpenedAt: Date?
+    /// How long the latch may stay set before it is assumed stuck.
+    ///
+    /// Reported 2026-11-11: "the app at the top says the headphones are not connected, but I think
+    /// they are working now". They were: the stream was playing at 363 kbps with the device as the
+    /// system output, and the menu had been frozen for fourteen hours — since the moment it was
+    /// first opened, when the headphones really were off.
+    ///
+    /// The cause is this latch and the assumption behind it. `menuIsOpen` is cleared by
+    /// `onDisappear`, and with `MenuBarExtra` in `.menu` style that callback is not reliably
+    /// called: the menu is dismissed by AppKit, the SwiftUI view is not torn down, and the flag
+    /// stays true for the life of the process. From then on every `refresh()` returns at the
+    /// guard, so nothing is ever published again — the menu shows whatever it showed the first
+    /// time it was opened, forever, while the icon and the stream move on.
+    ///
+    /// A status line two seconds stale is invisible; one fourteen hours stale is a lie. So the
+    /// latch is now bounded in time: past this, it is treated as stuck and cleared.
+    private static let openLatchLimit: TimeInterval = 60
     /// Where the last choice is remembered. `UserDefaults` is the right size for one string.
     private let selectionKey = "codecblue.selectedAddress"
 
@@ -157,8 +176,14 @@ final class AppModel: ObservableObject {
         // The ceiling when it is known, because that is a limit; otherwise the floor, worded as
         // what it is. "link 336 kbps" on a link nobody has pushed would read as a limit, and the
         // whole complaint being fixed here is numbers presented as promises.
+        // The word follows the evidence. "carries" is a limit and needs a ceiling; without one the
+        // honest sentence is "has done", which is a measurement of the past and not a promise about
+        // the future. Using "carries" for a floor is how "link 336 kbps" came to read as a cap.
         if linkKbps > 0 {
-            parts.append(String(format: "link carries %.0f kbps", linkKbps))
+            parts.append(
+                String(
+                    format: linkIsCeiling ? "link carries %.0f kbps" : "link has done %.0f kbps",
+                    linkKbps))
         } else if linkFloorKbps > 0 {
             parts.append(String(format: "link has done %.0f kbps", linkFloorKbps))
         }
@@ -203,20 +228,34 @@ final class AppModel: ObservableObject {
         // whatever was true up to two seconds earlier, which for a state that changes when a lid
         // closes is the wrong two seconds. Publishing once here is safe — the menu is not drawn
         // yet, so nothing can be closed by it.
-        refresh()
+        // Forced, not merely requested: if the latch is stuck true, an ordinary `refresh()` would
+        // return at the guard and the menu would open on the same stale numbers it is stuck on.
+        // Opening is the one moment a rebuild cannot close anything — the menu is not drawn yet.
+        refresh(force: true)
         menuIsOpen = true
+        menuOpenedAt = Date()
     }
 
     /// Called when it closes: refresh once, so the next open shows current numbers.
     func menuClosed() {
         menuIsOpen = false
+        menuOpenedAt = nil
         refresh()
     }
 
-    func refresh() {
+    func refresh(force: Bool = false) {
         // Polling continues while the menu is open — the icon depends on it — but nothing is
         // published, because publishing is what closes the submenu the pointer is in.
-        guard !menuIsOpen else { return }
+        //
+        // Unless the latch has been set for longer than any human keeps a menu open: then
+        // `onDisappear` was never called, and holding the menu still is holding it wrong.
+        if menuIsOpen, let openedAt = menuOpenedAt,
+            Date().timeIntervalSince(openedAt) > Self.openLatchLimit
+        {
+            menuIsOpen = false
+            menuOpenedAt = nil
+        }
+        guard force || !menuIsOpen else { return }
         headphones = BluetoothHeadphone.audioDevices()
         if let ring = try? SharedRing() { deviceRate = ring.sampleRate }
         // A pair that was chosen and has since been unpaired: forget it rather than showing a
@@ -262,11 +301,39 @@ final class AppModel: ObservableObject {
         // to say "this does not fit", and `link_floor` is what the link has demonstrably carried.
         // For *display* the floor is the better of the two when the ceiling is missing, because it
         // is measured rather than assumed, and `QualityLevels` says which one it used.
+        // A ceiling *below* what is playing is not a ceiling, it is one unlucky window.
+        //
+        // Measured 2026-11-11, with the stream running cleanly: `link_ceiling 250`, `link_floor
+        // 312`, `quality_kbps 303`, `skips 0`. The menu said "link carries 250 kbps" while 303 was
+        // going through without losing a sample — a number smaller than the thing it claimed to
+        // bound. The ceiling is the throughput of *one* window that dropped audio, and a window
+        // can drop because `bluetoothd` stalled, not because the level does not fit; the code
+        // already knows this (see the settle rule), and the display did not.
+        //
+        // So the playing bitrate is the third witness, and it settles the argument: a link cannot
+        // be carrying less than what is demonstrably passing through it. When the ceiling is below
+        // that, the ceiling is discarded and the floor is used instead — the floor is a measurement
+        // of what the link has done, which is exactly the claim being made.
         let ceiling = Double(values["link_ceiling"] ?? "0") ?? 0
         let floor = Double(values["link_floor"] ?? "0") ?? 0
-        linkIsCeiling = ceiling > 0
-        linkKbps = ceiling > 0 ? ceiling : floor
-        linkFloorKbps = Double(values["link_floor"] ?? "0") ?? 0
+        let playing = Double(values["quality_kbps"] ?? "0") ?? 0
+        // Both witnesses, and the floor was missing.
+        //
+        // Measured 2026-11-11: `link_ceiling 514`, `link_floor 549`, `quality_kbps 303`. The
+        // ceiling passed the playing-bitrate test (514 >= 303) and was used, so the menu said the
+        // link carries 514 kbps while the stream's own history said it had carried 549. A ceiling
+        // below the floor is self-contradictory: the floor is the maximum throughput ever measured,
+        // so nothing can credibly bound the link beneath it.
+        //
+        // This is what makes the three levels update in the background without touching the rung:
+        // the floor is measured passively on every window, at whatever level is playing, and it is
+        // the one number that improves without a probe. Letting a stale ceiling override it threw
+        // away the only free measurement there is.
+        let witness = max(playing, floor)
+        let ceilingIsCredible = ceiling > 0 && (witness <= 0 || ceiling >= witness)
+        linkIsCeiling = ceilingIsCredible
+        linkKbps = ceilingIsCredible ? ceiling : floor
+        linkFloorKbps = floor
         streamRate = Int(values["sample_rate"] ?? "48000") ?? 48000
         note = nil
     }

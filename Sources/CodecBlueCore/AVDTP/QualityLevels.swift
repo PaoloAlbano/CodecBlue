@@ -54,8 +54,33 @@ public enum QualityLevels {
     /// The unnamed rungs are not a loss. They exist so the adapter can land between SQ and LQ when
     /// a link carries ~450 kbps, and that is a decision the stream makes for itself — it is not a
     /// preference anyone expresses by hand. Choosing "HQ" on such a link still ends up on 492.
-    public static func menuLevels(capacityKbps: Double, sampleRate: Int = 48000) -> [Level] {
-        describe(capacityKbps: capacityKbps, sampleRate: sampleRate)
+    /// The rungs a menu should offer, which is the three named ones *plus whatever is playing*.
+    ///
+    /// Reported 2026-11-11: "I tried to select another quality, HD, but the selection does not work,
+    /// it does not change". It did change — the request was accepted, HQ ran at 909 kbps — and then
+    /// the settle rule took it down to 363, which is rung 3. And rung 3 was not in the menu: the
+    /// list is built from rungs 0, 1 and 4, so the tick had no row to land on and the menu looked
+    /// exactly as it had before. The selection worked and the menu could not say so.
+    ///
+    /// The two unnamed rungs are still not offered as choices — nobody expresses a preference for
+    /// "492 kbps" by hand, and that argument still holds. But a rung the stream is *on* has to be
+    /// visible, or the menu is describing a different stream from the one playing.
+    public static func menuLevels(
+        capacityKbps: Double, sampleRate: Int = 48000, playingRung: Int? = nil
+    ) -> [Level] {
+        // Three rows, always. A fourth row for the rung the stream settled on was wrong, and the
+        // question that killed it was the right one: "why 4 and not 3? what is it for?".
+        //
+        // It was there so the tick had somewhere to land — the settle rule can put the stream on
+        // rung 2 or 3, which are not offered. But adding a row to hold a tick answers the wrong
+        // question: the menu is a list of choices, and a choice the stream made for itself is not
+        // one of them. What the row was really for is saying "this is what you are getting", and
+        // that belongs on the row of the level that was *asked for* — which is one of the three.
+        //
+        // So the playing rung is passed in to be *marked*, not to be added: see `menuLabel`'s
+        // `playingRung`.
+        _ = playingRung
+        return describe(capacityKbps: capacityKbps, sampleRate: sampleRate)
             .filter { $0.rung == 0 || $0.rung == 1 || $0.rung == 4 }
     }
 
@@ -79,9 +104,19 @@ public enum QualityLevels {
     /// Same rule as `menuLabel`: the number is what the listener gets, not what the rung asks for.
     /// A line that says "HQ 990 kbps — too much for this link" is asking the reader to do the
     /// division that the code has already done.
-    public static func label(_ level: Level, capacityKbps: Double) -> String {
-        let effective = wouldUse(level, capacityKbps: capacityKbps)
-        let number = effective ?? level.nominalKbps
+    public static func label(
+        _ level: Level, capacityKbps: Double, sampleRate: Int = 48000
+    ) -> String {
+        // The level's own bitrate, and where it lands said separately — the same rule as
+        // `menuLabel`, and for the same reason: putting the landing bitrate in the level's own
+        // place made every rung above the link's capacity print the same number.
+        // `sampleRate` is threaded through, and it was not: `describe` built the levels at the
+        // device's rate while these two functions asked `wouldUse` with the 48000 default, so the
+        // "settles on" figure came from a different ladder than the level list it sat in. At 44.1
+        // kHz that is a whole rung of error — measured 2026-11-11, "settles on 396" printed next to
+        // a 44.1 kHz ladder whose rung 3 is 363.
+        let effective = wouldUse(level, capacityKbps: capacityKbps, sampleRate: sampleRate)
+        let number = level.nominalKbps
         // An unnamed rung has no word to put before its bitrate, and `492 492 kbps` reads as a
         // typo. The number is the name.
         let named = level.rung != 2 && level.rung != 3
@@ -91,7 +126,7 @@ public enum QualityLevels {
         guard capacityKbps > 0 else { return named ? level.name : head }
         let carried = String(format: "%.0f", capacityKbps)
         if let effective, effective != level.nominalKbps {
-            return "\(head) — capped by this link (\(carried) available)"
+            return "\(head) — settles on \(effective) (\(carried) available)"
         }
         if level.fits { return "\(head) — fits (\(carried) available)" }
         if nothingFits(capacityKbps: capacityKbps) && level.rung == 4 {
@@ -141,7 +176,7 @@ public enum QualityLevels {
     /// pick here, so the menu answers "what will I get?" and not just "what exists?".
     public static func menuLabel(
         _ level: Level, capacityKbps: Double, streaming: Bool = false, playingKbps: Int? = nil,
-        cappedByCeiling: Bool = true
+        cappedByCeiling: Bool = true, sampleRate: Int = 48000
     ) -> String {
         // The number shown is what the listener will *get*, not what the rung asks for.
         //
@@ -159,8 +194,20 @@ public enum QualityLevels {
         // loses audio — so on every healthy stream the capacity was 0 and the label said 990 while
         // 303 was playing. The caller now passes the floor when there is no ceiling, and
         // `cappedByCeiling` says which one it was, because the two support different sentences.
-        let effective = wouldUse(level, capacityKbps: capacityKbps)
-        let number = effective ?? level.nominalKbps
+        // The number beside a level is *its own* bitrate; where it would land is a separate clause.
+        //
+        // Reported 2026-11-11: "why 4 rows and not 3? what is it for?" — and the question exposed
+        // that the rows had stopped being distinguishable. `wouldUse` returns
+        // `max(fitted, level.rung)`, so on a link that fits only rung 3 every level above it
+        // reported rung 3's bitrate: HQ, SQ and both unnamed rungs all read "396 kbps". Three rows
+        // saying one number is not a menu, it is a riddle, and adding a fourth row for the playing
+        // rung made it worse.
+        //
+        // So the row says what that level *is* — 909, 606, 303 at 44.1 kHz — and the settling is
+        // said separately. "HQ 909 kbps · settles on 363" answers both questions the row was being
+        // asked to answer with one number, and two rows can no longer collapse into one.
+        let effective = wouldUse(level, capacityKbps: capacityKbps, sampleRate: sampleRate)
+        let number = level.nominalKbps
 
         // Before a measurement, the named rungs show only their name.
         //
@@ -195,18 +242,27 @@ public enum QualityLevels {
                 text = showNumbers ? "\(level.longName) · \(number) kbps" : level.longName
             }
         }
-        if capacityKbps > 0, effective != nil, effective != level.nominalKbps {
-            // Said once, at the end, and only when the two differ: "High · 330 kbps" on its own
-            // would look like a typo to anyone who knows HQ is 990.
-            //
-            // "capped" only when the number came from a *ceiling* — a window that lost audio, the
-            // only evidence that something does not fit. When it came from the floor, the honest
-            // word is "has carried": the link has never been asked for more, so saying it cannot
-            // do more would be a guess, and the guess is exactly what `link_floor` exists to avoid.
-            text += cappedByCeiling ? " · capped by this link" : " · this link has carried less"
+        // Where this level would actually land, said as its own clause.
+        //
+        // The old wording put the landing bitrate where the level's own number goes, so every row
+        // above the link's capacity showed the same figure and the menu stopped distinguishing its
+        // own choices. This says both: what the level is, and what it would settle on here.
+        if capacityKbps > 0, let effective, effective != level.nominalKbps {
+            // "settles on" when a ceiling measured it — a window that lost audio, the only
+            // evidence that something does not fit. When the number came from the floor, the
+            // honest word is "at least": the link has never been asked for more, so saying it
+            // cannot do more would be a guess, and avoiding that guess is what `link_floor` is for.
+            let landed = effective
+            text += cappedByCeiling ? " · settles on \(landed)" : " · at least \(landed)"
         }
         if capacityKbps <= 0 { return text }
-        if level.chosen { text = "✓ " + text }
+        // No tick here. The tick belongs to whoever draws the list, because there are two different
+        // questions and only the caller knows which one it is answering: "which rung would fit this
+        // link" (`chosen`) and "which rung is playing right now" (`QualityLevels.label` does the
+        // first, the menu bar does the second). Putting one of them in here meant the menu drew
+        // both, and on this link they coincide — the link carries 312 kbps, so `fitRung` picks LQ
+        // and the stream is also playing LQ. Reported 2026-11-11: "next to LQ, which is the chosen
+        // one, I see two ticks".
         if nothingFits(capacityKbps: capacityKbps) && level.rung == 4 {
             text += " · the lowest there is"
         }

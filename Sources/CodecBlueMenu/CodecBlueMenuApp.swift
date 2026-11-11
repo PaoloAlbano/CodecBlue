@@ -113,7 +113,11 @@ struct ContentView: View {
             ForEach(
                 QualityLevels.menuLevels(
                     capacityKbps: model.linkKbps,
-                    sampleRate: model.streamRate), id: \.rung
+                    sampleRate: model.streamRate,
+                    // So the tick always has a row to land on: the settle rule can put the stream
+                    // on a rung that is not one of the three offered, and a menu with no tick at
+                    // all reads as "your selection did nothing".
+                    playingRung: model.qualityRung), id: \.rung
             ) { level in
                 Button {
                     model.setQuality("\(level.rung)")
@@ -133,7 +137,8 @@ struct ContentView: View {
                                 level, capacityKbps: model.linkKbps,
                                 streaming: model.isStreaming,
                                 playingKbps: playing ? model.playingKbps : nil,
-                                cappedByCeiling: model.linkIsCeiling))
+                                cappedByCeiling: model.linkIsCeiling,
+                                sampleRate: model.streamRate))
                 }
             }
             Divider()

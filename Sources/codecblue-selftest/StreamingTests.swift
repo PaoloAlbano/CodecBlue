@@ -1070,17 +1070,26 @@ func launchAgentTests() {
         // link gives — reported 2026-11-09 as "still High 990, and that does not add up".
         // The number shown is what the listener gets, not what the rung asks for. Reported
         // 2026-11-09: "if you know the max is 336 show HQ with 336 and don't show me the 990 one".
+        // Changed 2026-11-11: the row shows the level's own bitrate and says where it settles,
+        // because putting the landing figure in the level's place made every row above the link's
+        // capacity print the same number — HQ, SQ and both unnamed rungs all read "396 kbps", and
+        // the report was "why 4 rows and not 3? what is it for?".
         check(
             QualityLevels.menuLabel(levels[0], capacityKbps: 530)
-                == "High · 396 kbps · capped by this link",
+                == "High · 990 kbps · settles on 396",
             "\(QualityLevels.menuLabel(levels[0], capacityKbps: 530))")
         check(
             QualityLevels.menuLabel(levels[4], capacityKbps: 530) == "Low · 330 kbps",
             "\(QualityLevels.menuLabel(levels[4], capacityKbps: 530))")
         // The unnamed rung is still on the ladder — the adapter lands on it — but it is not in
         // the menu, so its label is a bare number and no positional filler.
+        //
+        // No tick in the label: it used to carry one for `chosen`, and the menu drew its own for
+        // the playing rung, so on a link where the two coincide (312 kbps here: `fitRung` picks LQ
+        // and LQ is playing) the row showed two. Reported 2026-11-11. The tick belongs to the
+        // caller, which is the only one that knows which question it is answering.
         check(
-            QualityLevels.menuLabel(levels[3], capacityKbps: 530) == "✓ 396 kbps",
+            QualityLevels.menuLabel(levels[3], capacityKbps: 530) == "396 kbps",
             "\(QualityLevels.menuLabel(levels[3], capacityKbps: 530))")
         // A ceiling *below* what fits is honoured: asking for Low on a fast link gives Low, not the
         // best the link could do. A ceiling is a limit, and a limit the program ignores is not a
@@ -2458,14 +2467,17 @@ func qualityMenuTests() {
             "the ladder is still five rungs")
     }
 
-    test("a rung the link cannot carry says what it would give here, not just its nominal") {
+    test("a rung the link cannot carry says both what it is and where it lands") {
         let levels = QualityLevels.describe(capacityKbps: 530, sampleRate: 48000)
         let hq = levels.first { $0.rung == 0 }!
         let label = QualityLevels.menuLabel(hq, capacityKbps: 530)
-        // The nominal is *not* shown: it is what the rung asks for, and showing it next to a link
-        // that cannot carry it is the complaint being fixed. What is shown is the outcome.
-        check(!label.contains("990"), "the request must not be shown as the result: \(label)")
-        check(label.contains("396"), "the outcome is what matters: \(label)")
+        // Changed 2026-11-11. The old rule showed only the outcome, which was right when the rows
+        // were otherwise indistinguishable and wrong once they were: `wouldUse` returns
+        // `max(fitted, rung)`, so every row above the link's capacity printed the same figure and
+        // the menu looked like it had one choice repeated. Both numbers are now said, in different
+        // places, so the row says what the level is and what it would settle on.
+        check(label.contains("990"), "the level's own bitrate is named: \(label)")
+        check(label.contains("settles on 396"), "and so is the outcome: \(label)")
         check(!label.contains("✓"), "a rung that does not fit is not the one chosen: \(label)")
     }
 
@@ -2647,12 +2659,15 @@ func lowRungTests() {
 /// the old shape — the same mistake in a second place, which is why this test exists: the two
 /// surfaces are one rule, and a rule that only holds in one of them is not a rule.
 func labelTests() {
-    test("a capped rung shows what it gives, not what it asks for") {
+    test("a capped rung shows both what it is and what it gives") {
+        // Changed 2026-11-11: showing only the outcome made every row above the link's capacity
+        // print the same figure, because `wouldUse` returns `max(fitted, rung)`. The level's own
+        // bitrate is now named, and the landing is a separate clause.
         let levels = QualityLevels.describe(capacityKbps: 530, sampleRate: 48000)
         let hq = QualityLevels.label(levels[0], capacityKbps: 530)
-        check(!hq.contains("990"), "the request is not the result: \(hq)")
-        check(hq.contains("396"), "the result is what is shown: \(hq)")
-        check(hq.contains("capped"), "and why: \(hq)")
+        check(hq.contains("990"), "the level is named: \(hq)")
+        check(hq.contains("settles on 396"), "and so is the result: \(hq)")
+        check(!hq.contains("capped by this link"), "the old wording is gone: \(hq)")
     }
 
     test("a rung that fits says so, and the bottom says it is the bottom") {
@@ -3170,11 +3185,14 @@ func capacityFallbackTests() {
         let hq = floorOnly[0]
         let label = QualityLevels.menuLabel(
             hq, capacityKbps: 312, streaming: true, cappedByCeiling: false)
-        check(!label.contains("990"), "HQ cannot say 990 on a 312 kbps link: \(label)")
-        check(label.contains("330") || label.contains("303"), "it says what it gives: \(label)")
+        // The row names the level's own bitrate and says where it lands. What must never happen is
+        // a row that *claims* the link carries less than it has: the landing clause says "at least"
+        // when the figure came from the floor.
+        check(label.contains("909"), "HQ is 909 at 44.1 kHz: \(label)")
+        check(label.contains("at least 330"), "and it says what the link has done: \(label)")
         check(
-            label.contains("has carried"), "and it does not claim the link cannot do more: \(label)"
-        )
+            !label.contains("settles on"),
+            "a floor is not a measurement of what does not fit: \(label)")
     }
 
     test("a ceiling is allowed to say 'capped', a floor is not") {
@@ -3182,18 +3200,25 @@ func capacityFallbackTests() {
         let withCeiling = QualityLevels.menuLabel(
             levels[0], capacityKbps: 312, streaming: true, cappedByCeiling: true)
         check(
-            withCeiling.contains("capped"), "a window that lost audio is evidence: \(withCeiling)")
+            withCeiling.contains("settles on"),
+            "a window that lost audio is evidence: \(withCeiling)"
+        )
         let withFloor = QualityLevels.menuLabel(
             levels[0], capacityKbps: 312, streaming: true, cappedByCeiling: false)
-        check(!withFloor.contains("capped"), "a floor is not: \(withFloor)")
+        check(!withFloor.contains("settles on"), "a floor is not: \(withFloor)")
     }
 
     test("the menu reads the floor when the ceiling is missing") {
         let source = try? String(
             contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
         let body = source ?? ""
-        check(body.contains("linkKbps = ceiling > 0 ? ceiling : floor"), "the fallback is explicit")
-        check(body.contains("linkIsCeiling = ceiling > 0"), "and the distinction is kept")
+        // The rule moved on 2026-11-11: a ceiling is only used when it is credible against the
+        // playing bitrate, so the fallback is no longer a bare `ceiling > 0`. See
+        // `linkCeilingCredibilityTests` for why, and for the case that forced it.
+        check(
+            body.contains("linkKbps = ceilingIsCredible ? ceiling : floor"),
+            "the fallback is explicit")
+        check(body.contains("linkIsCeiling = ceilingIsCredible"), "and the distinction is kept")
     }
 }
 
@@ -3324,5 +3349,254 @@ func driverClockTests() {
         let secondsToFill = 48000.0 / surplus
         check(abs(secondsToFill - 12.3) < 0.1, "\(secondsToFill) s to fill the ring")
         check(abs(48000.0 / 44100.0 - 1.088) < 0.001, "and the ring holds 1088 ms")
+    }
+}
+
+/// A menu frozen for fourteen hours, because a latch was never cleared.
+///
+/// Reported 2026-11-11: "the app at the top says the headphones are not connected, but I think they
+/// are working now". They were — 363 kbps, device as system output — and the menu had been showing
+/// the state it read the first time it was opened, when they really were off.
+///
+/// `menuIsOpen` is cleared by `onDisappear`, and with `MenuBarExtra(.menu)` that callback is not
+/// reliably called: AppKit dismisses the menu without tearing down the SwiftUI view, the flag stays
+/// true, and every later `refresh()` returns at the guard. A status line two seconds stale is
+/// invisible; one fourteen hours stale is a lie.
+func menuLatchTests() {
+    let source = try? String(
+        contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+    let body = source ?? ""
+
+    test("opening the menu refreshes even if the latch is stuck") {
+        check(body.contains("refresh(force: true)"), "opening forces a reading")
+        check(body.contains("func refresh(force: Bool = false)"), "and refresh can be forced")
+        check(
+            body.contains("guard force || !menuIsOpen else { return }"),
+            "the guard yields to the force")
+    }
+
+    test("the latch cannot stay set forever") {
+        check(body.contains("openLatchLimit"), "there is a limit")
+        check(
+            body.contains("Date().timeIntervalSince(openedAt) > Self.openLatchLimit"),
+            "and it is compared against how long the menu has been open")
+        // A minute is longer than anyone keeps a menu open and far shorter than a working day.
+        check(body.contains("openLatchLimit: TimeInterval = 60"), "a minute, not a day")
+    }
+}
+
+/// A ceiling below what is playing is not a ceiling.
+///
+/// Measured 2026-11-11 with the stream running cleanly: `link_ceiling 250`, `link_floor 312`,
+/// `quality_kbps 303`, `skips 0`. The menu said "link carries 250 kbps" while 303 went through
+/// without losing a sample — a bound smaller than the thing it bounded.
+///
+/// The ceiling is the throughput of one window that dropped audio, and a window can drop because
+/// `bluetoothd` stalled. The playing bitrate is the third witness and it settles the argument: a
+/// link cannot be carrying less than what is demonstrably passing through it.
+func linkCeilingCredibilityTests() {
+    let source = try? String(
+        contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+    let body = source ?? ""
+
+    test("the ceiling is discarded when it is below the playing bitrate") {
+        check(
+            body.contains(
+                "let ceilingIsCredible = ceiling > 0 && (witness <= 0 || ceiling >= witness)"),
+            "the playing bitrate and the floor are the witnesses")
+        check(
+            body.contains("let witness = max(playing, floor)"),
+            "a ceiling below the floor is self-contradictory")
+        check(
+            body.contains("linkKbps = ceilingIsCredible ? ceiling : floor"),
+            "and an incredible ceiling falls back to the floor")
+        check(
+            body.contains("let playing = Double(values[\"quality_kbps\"] ?? \"0\") ?? 0"),
+            "read from the stream's own report")
+    }
+
+    test("the word follows the evidence") {
+        check(
+            body.contains(
+                "linkIsCeiling ? \"link carries %.0f kbps\" : \"link has done %.0f kbps\""),
+            "carries needs a ceiling, has done is a measurement")
+    }
+
+    test("the arithmetic of the measured case") {
+        // 250 is not credible against 303; 312 is the floor that replaces it.
+        let ceiling = 250.0
+        let floor = 312.0
+        let playing = 303.0
+        let credible = ceiling > 0 && (playing <= 0 || ceiling >= playing)
+        check(!credible, "250 cannot bound 303")
+        check(credible == false ? floor > playing : true, "the floor does bound it: 312 >= 303")
+        // And a ceiling above the playing bitrate is still a ceiling.
+        let high = 497.0
+        check(high > 0 && high >= playing, "497 is credible against 303")
+    }
+}
+
+/// Two ticks on one row, because two different questions were both answered with a tick.
+///
+/// Reported 2026-11-11: "next to LDAC quality, beside LQ which is the chosen one, I see two ticks".
+/// `menuLabel` prefixed "✓ " when the rung was `chosen` — the rung `fitRung` would pick for this
+/// link — and the menu bar prefixed its own when the rung was *playing*. On this link the two
+/// coincide (312 kbps of floor, so `fitRung` picks LQ, and LQ is what plays), so the row read
+/// "✓ ✓ Low · 303 kbps".
+///
+/// The two questions are genuinely different and both are worth asking, which is why this is a
+/// division of labour and not a deletion: `codecblue levels` asks "what would fit here" and draws
+/// `chosen`; the menu bar asks "what is playing" and draws that. Neither should draw the other's.
+func doubleTickTests() {
+    test("the label carries no tick of its own") {
+        let levels = QualityLevels.describe(capacityKbps: 312, sampleRate: 44100)
+        for level in levels {
+            let label = QualityLevels.menuLabel(level, capacityKbps: 312)
+            check(!label.hasPrefix("✓"), "rung \(level.rung) must not tick itself: \(label)")
+        }
+    }
+
+    test("the rung that fits is still reported, just not as a tick") {
+        // The information is not lost: `chosen` is what `codecblue levels` draws.
+        let levels = QualityLevels.describe(capacityKbps: 312, sampleRate: 44100)
+        let chosen = levels.filter(\.chosen)
+        check(chosen.count == 1, "exactly one rung fits: \(chosen.map(\.rung))")
+        check(chosen.first?.rung == 4, "and on 312 kbps it is the bottom one")
+    }
+
+    test("the command line still ticks, because there the tick is the answer") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("(level.chosen ? \"✓ \" : \"  \")"), "levels draws the tick itself")
+    }
+}
+
+/// A chosen latency that grows back is not a setting.
+///
+/// Reported 2026-11-11: "I selected a different latency but the selection does not work, it does not
+/// change". It changed and then changed back: `cushion 100` logged "100 ms by request", the next
+/// stall logged "widened to 200 ms", and the latency went 198 -> 302 ms. The chosen value was a
+/// starting point, not a bound.
+///
+/// For a menu offering "30 ms — tightest" and "150 ms — steadiest" that is backwards. Choosing the
+/// tightest says "I accept the risk of a stall for the latency"; growing to 200 ms anyway takes the
+/// latency and gives back nothing that was asked for.
+func cushionCeilingTests() {
+    test("the chosen cushion bounds the automatic growth") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(
+            body.contains("queue.retune(floor: requested, ceiling: requested)"),
+            "the choice is the floor and the ceiling")
+        check(
+            !body.contains("ceiling: max(queueCeiling, requested)"),
+            "and not a floor with the default ceiling above it")
+    }
+
+    test("a queue cannot grow past its ceiling") {
+        var queue = PacketQueue(
+            sampleRate: 44100, floorDuration: 0.03, ceilingDuration: 0.03)
+        // noteStall doubles towards the ceiling; with ceiling == floor it cannot move.
+        let before = queue.maxDuration
+        let changed = queue.noteStall()
+        check(!changed, "a stall cannot widen it past the ceiling")
+        check(queue.maxDuration == before, "so the latency stays where it was chosen")
+    }
+
+    test("but it can still shrink back to the floor") {
+        var queue = PacketQueue(
+            sampleRate: 44100, floorDuration: 0.03, ceilingDuration: 0.2)
+        _ = queue.noteStall()
+        check(queue.maxDuration > 0.03, "a stall widens it when there is room")
+        _ = queue.relax()
+        check(queue.maxDuration >= 0.03, "and relaxing never goes below the floor")
+    }
+}
+
+/// A selection that works, on a menu that cannot say so.
+///
+/// Reported 2026-11-11: "I tried to select another quality, HD, but the selection does not work, it
+/// does not change". It did change: the request was accepted and HQ ran at 909 kbps. Then the settle
+/// rule took it down to 363 kbps — rung 3 — and rung 3 was not in the menu, because the list is
+/// built from rungs 0, 1 and 4. The tick had no row to land on, so the menu looked exactly as it had
+/// before the click.
+///
+/// The two unnamed rungs are still not offered as choices: nobody expresses a preference for "492
+/// kbps" by hand. But a rung the stream is *on* has to be visible, or the menu describes a different
+/// stream from the one playing.
+func playingRungVisibleTests() {
+    test("three rows, always — a fourth was the wrong answer") {
+        // Asked 2026-11-11: "why 4 rows and not 3? what is it for?". The extra row existed so the
+        // tick had somewhere to land when the settle rule put the stream on rung 2 or 3. But a
+        // menu is a list of choices, and a choice the stream made for itself is not one of them.
+        let levels = QualityLevels.menuLevels(capacityKbps: 532, playingRung: 3)
+        check(levels.map(\.rung) == [0, 1, 4], "three rows: \(levels.map(\.rung))")
+    }
+
+    test("without a playing rung the menu is still the three named ones") {
+        let levels = QualityLevels.menuLevels(capacityKbps: 532)
+        check(levels.map(\.rung) == [0, 1, 4], "\(levels.map(\.rung))")
+    }
+
+    test("a playing rung that is already offered is not duplicated") {
+        let levels = QualityLevels.menuLevels(capacityKbps: 532, playingRung: 4)
+        check(levels.map(\.rung) == [0, 1, 4], "no second Low: \(levels.map(\.rung))")
+    }
+
+    test("the menu passes the playing rung") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/CodecBlueMenuApp.swift", encoding: .utf8)
+        check(
+            (source ?? "").contains("playingRung: model.qualityRung"),
+            "or the tick has nowhere to land again")
+    }
+}
+
+/// A ceiling measured at rest, so the menu answers before the first note.
+///
+/// The alternative is a probe during playback, and a probe is not free: a level change makes the
+/// encoder produce a different frame size, so the queued packets — stale and the wrong shape — are
+/// dropped, which is a 30-60 ms hole, and the higher level then throws away 40% of the audio for a
+/// second or two before settling. Measured 2026-11-07 and 2026-11-08; the second is why the old
+/// time-expiring block was removed from the adapter.
+///
+/// `codecblue flood` measures the same thing with no audio at all in 15 seconds. Measured three
+/// times on 2026-11-11: 454, 496 and 504 kbps, so 485 is the number written into the plist.
+func knownCapacityTests() {
+    test("a capacity measured at rest seeds the ceiling") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("public var knownCapacityKbps: Double = 0"), "the property exists")
+        check(
+            body.contains("currentCarriedKbps = knownCapacityKbps"),
+            "and it seeds the ceiling the menu reads")
+        check(
+            body.contains("if knownCapacityKbps > 0, currentCarriedKbps <= 0"),
+            "without overwriting a ceiling a real window measured")
+    }
+
+    test("both parsers accept --capacity, or the setting dies on restart") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        let cases = body.components(separatedBy: "case \"--capacity\":").count - 1
+        check(cases == 2, "play and system both parse it: \(cases)")
+        check(body.contains("knownCapacityKbps = kbps"), "and both store it")
+        // `system` is what `start` and the login item run, so an option only `play` accepts is a
+        // setting that works until the agent restarts itself.
+        let seeds =
+            body.components(separatedBy: "streamer.knownCapacityKbps = knownCapacityKbps")
+            .count - 1
+        check(seeds == 2, "and both paths hand it to the streamer: \(seeds)")
+    }
+
+    test("the flood numbers that produced 485") {
+        // Three runs, same link, same day. The spread is the measurement's own noise: the flood
+        // offers raw ACL packets and counts what the socket refused.
+        let runs = [454.0, 496.0, 504.0]
+        let mean = runs.reduce(0, +) / Double(runs.count)
+        check(abs(mean - 485) < 1, "the mean is 485: \(mean)")
+        check(runs.max()! / runs.min()! < 1.15, "and the runs agree within 15%")
     }
 }
