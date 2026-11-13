@@ -3289,12 +3289,10 @@ func menuBuildTests() {
     test("install.sh compares what it installed against what it built") {
         let source = try? String(contentsOfFile: "scripts/install.sh", encoding: .utf8)
         let body = source ?? ""
-        check(
-            body.contains("md5 -q \"$MENU_APP/Contents/MacOS/CodecBlueMenu\""),
-            "the built bundle is hashed")
-        check(
-            body.contains("md5 -q \"$APP_DIR/CodecBlue.app/Contents/MacOS/CodecBlueMenu\""),
-            "the installed one is hashed")
+        // Rewritten 2026-11-11: the check is now one function used four times, so the two literal
+        // `md5 -q` lines it used to look for are gone — the paths arrive as arguments.
+        check(body.contains("built=$(md5 -q \"$from\""), "the built copy is hashed")
+        check(body.contains("installed=$(md5 -q \"$to\""), "the installed one is hashed")
         check(body.contains("is not the one just built"), "and a difference is an error")
     }
 }
@@ -3655,5 +3653,53 @@ func capacitySurvivesRewriteTests() {
         let zero = LaunchAgent.arguments(
             quality: "4", adapt: true, cushionMilliseconds: 60, capacityKbps: 0)
         check(!zero.contains("--capacity"), "and zero is not a measurement: \(zero)")
+    }
+}
+
+/// Every piece the installer copies must be checked, not only the one that bit us first.
+///
+/// The menu was covered on 2026-11-10 and the CLI, the media key helper and the driver were not,
+/// which is the wrong way round: the driver is the one that needs sudo, so a copy that silently
+/// does not take is the one nobody notices until they hear it, and the CLI is what `codecblue
+/// status` runs, so a stale one reports yesterday's rules about a stream following today's.
+func installChecksEveryPieceTests() {
+    test("install.sh checks all four copies") {
+        let source = try? String(contentsOfFile: "scripts/install.sh", encoding: .utf8)
+        let body = source ?? ""
+        check(
+            body.contains("check_copy()"), "the check is a function, so it is used more than once")
+        for piece in [
+            "menu bar app", "command line", "media key helper",
+            "media key helper in the bundle",
+        ] {
+            check(body.contains("check_copy \"\(piece)\""), "checks the \(piece)")
+        }
+    }
+
+    test("a copy that did not take is an error, not a warning") {
+        let source = try? String(contentsOfFile: "scripts/install.sh", encoding: .utf8)
+        let body = source ?? ""
+        // `|| exit 1` and not `|| true`: a warning here is a silent stale binary, which is the whole
+        // reason the check exists.
+        let exits = body.components(separatedBy: "|| exit 1").count - 1
+        check(exits >= 4, "each check stops the install: \(exits)")
+    }
+
+    test("the driver is checked before coreaudiod is restarted") {
+        let source = try? String(contentsOfFile: "scripts/build-driver.sh", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("the installed driver is not the one just built"), "it is checked")
+        // Named `mismatch`, not `check`: `check` is the assertion function, and shadowing it made
+        // the next line fail to compile with "cannot call value of non-function type Range".
+        guard let mismatch = body.range(of: "the installed driver is not the one just built"),
+            let restart = body.range(of: "sudo killall coreaudiod")
+        else {
+            check(false, "both the check and the restart are present")
+            return
+        }
+        // Order matters: restarting first would load the old driver and then report the mismatch,
+        // leaving the machine running the wrong binary with a message about it.
+        check(mismatch.lowerBound < restart.lowerBound, "and before the restart, not after")
+        check(body.contains("coreaudiod was NOT restarted"), "and it says so when it fails")
     }
 }

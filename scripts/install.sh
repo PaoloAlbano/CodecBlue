@@ -94,16 +94,36 @@ sh "$HERE/scripts/sign.sh" "$APP_DIR/CodecBlue.app" com.codecblue.menu 2>/dev/nu
 # icon was restarted without anyone checking. The cause is that `build-menu-app.sh` may return an
 # older bundle than the one just built, and nothing compared the two. A copy is not an install
 # until it is the same bytes.
-built=$(md5 -q "$MENU_APP/Contents/MacOS/CodecBlueMenu" 2>/dev/null)
-installed=$(md5 -q "$APP_DIR/CodecBlue.app/Contents/MacOS/CodecBlueMenu" 2>/dev/null)
-if [ -z "$built" ] || [ "$built" != "$installed" ]; then
-    echo "error: the installed menu bar app is not the one just built" >&2
-    echo "  built:     $MENU_APP  ${built:-missing}" >&2
-    echo "  installed: $APP_DIR/CodecBlue.app  ${installed:-missing}" >&2
-    echo "  the copy did not take, or build-menu-app.sh returned a stale bundle" >&2
-    exit 1
-fi
-echo "   menu bar app: md5 $installed (matches the build)"
+# The same check for every piece, not only the menu.
+#
+# Added 2026-11-11. The menu was covered on 2026-11-10 and the other two were not, which is the
+# wrong way round: the driver is the one that needs sudo, so a copy that silently does not take is
+# the one nobody notices until they hear it — and the CLI is what `codecblue status` runs, so a
+# stale one reports yesterday's rules about a stream that is following today's.
+#
+# `check_copy <what> <built> <installed>`: both must exist and be the same bytes.
+check_copy() {
+    what=$1; from=$2; to=$3
+    built=$(md5 -q "$from" 2>/dev/null)
+    installed=$(md5 -q "$to" 2>/dev/null)
+    if [ -z "$built" ] || [ "$built" != "$installed" ]; then
+        echo "error: the installed $what is not the one just built" >&2
+        echo "  built:     $from  ${built:-missing}" >&2
+        echo "  installed: $to  ${installed:-missing}" >&2
+        echo "  the copy did not take, or a build script returned a stale artifact" >&2
+        return 1
+    fi
+    echo "   $what: md5 $installed (matches the build)"
+}
+
+check_copy "menu bar app" "$MENU_APP/Contents/MacOS/CodecBlueMenu" \
+    "$APP_DIR/CodecBlue.app/Contents/MacOS/CodecBlueMenu" || exit 1
+check_copy "command line" ".build/debug/codecblue" "$APP_DIR/codecblue" || exit 1
+check_copy "media key helper" ".build/debug/codecblue-keys" "$APP_DIR/codecblue-keys" || exit 1
+# The bundle's copy is the one the app finds, and it is a second copy of the same file: if the two
+# disagree, the app and the CLI press media keys differently.
+check_copy "media key helper in the bundle" ".build/debug/codecblue-keys" \
+    "$APP_DIR/CodecBlue.app/Contents/MacOS/codecblue-keys" || exit 1
 echo "   $APP_DIR/codecblue"
 echo "   $APP_DIR/codecblue-keys"
 echo "   $APP_DIR/CodecBlue.app"

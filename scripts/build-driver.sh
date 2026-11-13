@@ -60,6 +60,24 @@ case "${1:-}" in
         sudo rm -rf "$INSTALL_DIR/CodecBlueDriver.driver" "$INSTALL_DIR/CodecBlueDriver.bundle"
         sudo cp -R "$BUNDLE" "$INSTALL_DIR/"
         sudo chown -R root:wheel "$INSTALL_DIR/CodecBlueDriver.driver"
+
+        # Check the copy took, before saying it did and before restarting coreaudiod.
+        #
+        # Added 2026-11-11. This is the one install that needs sudo, so it is the one where a copy
+        # that silently does not take is hardest to notice: the old driver keeps running, every
+        # number in the report looks right, and the fix you just made is not in the binary. It has
+        # already happened once with the menu (2026-11-10) and the lesson was written down; the
+        # driver was left out of it.
+        built=$(md5 -q "$BUNDLE/Contents/MacOS/CodecBlueDriver" 2>/dev/null)
+        installed=$(sudo md5 -q "$INSTALL_DIR/CodecBlueDriver.driver/Contents/MacOS/CodecBlueDriver" 2>/dev/null)
+        if [ -z "$built" ] || [ "$built" != "$installed" ]; then
+            echo "error: the installed driver is not the one just built" >&2
+            echo "  built:     $BUNDLE  ${built:-missing}" >&2
+            echo "  installed: $INSTALL_DIR/CodecBlueDriver.driver  ${installed:-missing}" >&2
+            echo "  coreaudiod was NOT restarted, so the old driver is still the one running" >&2
+            exit 1
+        fi
+        echo "driver: md5 $installed (matches the build)"
         echo "installed; restarting coreaudiod"
         sudo killall coreaudiod
         echo "done. 'CodecBlue' should now appear in System Settings > Sound."
