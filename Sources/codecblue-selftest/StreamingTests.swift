@@ -3753,3 +3753,48 @@ func calibrateTests() {
         check(body.contains("no login item to write to"), "it says what to run first")
     }
 }
+
+/// "The headphones are not reachable" was said about the wrong thing.
+///
+/// Measured 2026-11-11: the headphones were on the person's head, macOS listed them as connected, and
+/// the log said "the headphones are not reachable (they are off, out of range, or in their case)".
+/// They were none of those. `bluetoothd` had been running five days and had stopped answering the
+/// check-in; `sudo killall bluetoothd` fixed it at once. The message sent the person looking at their
+/// headphones for an hour.
+///
+/// A timeout is a fact about the daemon, not about the device.
+func bluetoothdTimeoutMessageTests() {
+    test("a timeout is reported as bluetoothd, not as the headphones") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(
+            body.contains("catch ClassicXPCError.timeout(let what)"),
+            "the timeout is caught separately")
+        check(body.contains("bluetoothd is not answering"), "and said as bluetoothd")
+        check(body.contains("sudo killall bluetoothd"), "with the one thing that fixes it")
+        check(body.contains("not the headphones"), "and it says what it is not")
+    }
+
+    test("the timeout branch is before the headphones branch, or it is unreachable") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let timeout = body.range(of: "catch ClassicXPCError.timeout"),
+            let headphones = body.range(of: "catch TakeoverError.headphonesDidNotConnect")
+        else {
+            check(false, "both branches are present")
+            return
+        }
+        // Swift matches catch clauses in order, so a broad one first would swallow the narrow one.
+        check(timeout.lowerBound < headphones.lowerBound, "timeout is matched first")
+    }
+
+    test("the timeout branch backs off like the other one") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        // Both branches must wait and grow, or a dead daemon becomes a tight retry loop.
+        let sleeps = body.components(separatedBy: "if await sleepUnlessStopping(backoff").count - 1
+        check(sleeps >= 2, "both branches wait interruptibly: \(sleeps)")
+        let grows = body.components(separatedBy: "backoff = min(backoff * 2, 60)").count - 1
+        check(grows >= 2, "and both grow the wait: \(grows)")
+    }
+}

@@ -1422,6 +1422,27 @@ func playSystem(_ address: String, options: [String]) async throws {
         do {
             interruptedByCall = try await playSystemOnce(
                 address, options: options, monitor: monitor, stopRequest: stopRequest)
+        } catch ClassicXPCError.timeout(let what) {
+            // "Not reachable" is a claim about the headphones, and it was being made about the
+            // wrong thing.
+            //
+            // Measured 2026-11-11: the headphones were on the person's head, macOS listed them as
+            // connected, and the log said "the headphones are not reachable (they are off, out of
+            // range, or in their case)". They were none of those. `bluetoothd` had been running for
+            // five days and had stopped answering the check-in; `sudo killall bluetoothd` fixed it
+            // at once. The message sent the person looking at their headphones for an hour.
+            //
+            // A timeout is a fact about the daemon, not about the device, so it is said as one — and
+            // it says what to do, because there is exactly one thing to do.
+            log(
+                String(
+                    format: "bluetoothd is not answering (%@); retrying in %.0f s", what, backoff))
+            log(
+                "  this is macOS's Bluetooth daemon, not the headphones: "
+                    + "if they show as connected, try  sudo killall bluetoothd")
+            if await sleepUnlessStopping(backoff, stopRequest: stopRequest) { break }
+            backoff = min(backoff * 2, 60)
+            continue
         } catch TakeoverError.headphonesDidNotConnect {
             log(
                 String(

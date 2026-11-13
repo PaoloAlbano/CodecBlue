@@ -217,9 +217,15 @@ worse. Testing a link with such a file tests the file. This cost a day.
 | `notes/findings/` | What was measured and what it proved, including the dead ends |
 | `third_party/libldac/` | AOSP libldac (git submodule, unmodified) |
 
-Only LDAC is implemented. aptX, AAC and SBC are the plan, not a claim: headphones that do not
-offer an LDAC endpoint cannot be driven by this yet, and the error says so explicitly rather
-than looking like a configuration problem.
+Only LDAC is implemented, and aptX, AAC and SBC are not planned here — see point 2 above: a pair
+that offers no LDAC endpoint is handed back to macOS, which plays to it in AAC or SBC, and the menu
+says `· AAC via macOS` beside it. Writing a second encoder would be a second packetiser and a second
+set of bugs for a result the system already produces.
+
+If the headphones show as connected in macOS and CodecBlue says they are not reachable, check
+`bluetoothd` before the headphones: it can run for days and stop answering its check-in, and
+`sudo killall bluetoothd` fixes it. The log distinguishes the two — `bluetoothd is not answering` is
+a fact about the daemon, `the headphones are not reachable` is a fact about the device.
 
 The menu bar app is a thin client: everything it shows comes from the list of headphones macOS
 knows and from the control channel of a running stream, and everything it does is write the
