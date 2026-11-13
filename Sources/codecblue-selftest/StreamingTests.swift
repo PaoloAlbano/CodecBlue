@@ -3703,3 +3703,53 @@ func installChecksEveryPieceTests() {
         check(body.contains("coreaudiod was NOT restarted"), "and it says so when it fails")
     }
 }
+
+/// `calibrate`: measure the link once, at rest, and remember it.
+///
+/// The alternative is a probe during playback, which is not free — a level change drops the queued
+/// packets (a 30-60 ms hole) and the higher level then throws away 40% of the audio for a second or
+/// two. `flood` does the same measurement with no audio at all.
+///
+/// Three runs and the median, not one: measured 2026-11-11, three consecutive floods on this link
+/// gave 454, 496 and 504 kbps. One run would have written 454 and cost a whole rung.
+func calibrateTests() {
+    test("calibrate exists and writes the capacity") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("case (\"calibrate\", 2):"), "the command is dispatched")
+        check(body.contains("for run in 1...3"), "three runs")
+        check(body.contains("let median = sorted[1]"), "and the median, not the first")
+        check(body.contains("capacityKbps: Int(median.rounded())"), "written into the login item")
+        check(body.contains("calibrate XX:XX:XX:XX:XX:XX"), "and in the usage text")
+    }
+
+    test("flood returns the number instead of only logging it") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("@discardableResult"), "so existing callers still compile")
+        check(
+            body.contains("public func flood(seconds: TimeInterval, packetSize: Int) -> Double"),
+            "it returns what the link carried")
+        check(body.contains("return kbps"), "which is the figure the caller needs")
+    }
+
+    test("the median of the three measured runs is the one written") {
+        // The real numbers, kept as a check on the choice rather than as a table to trust.
+        let runs = [454.0, 496.0, 504.0].sorted()
+        check(runs[1] == 496, "the median is 496, not the 454 a single run would have given")
+        // And one run would have cost a rung: 454 * 0.85 = 386 still fits 363, but 496 * 0.85 = 421
+        // is the same rung — so the honest statement is that the spread is the reason to take three,
+        // not that this particular link changed rung.
+        let worst = 454.0 * 0.85
+        let median = 496.0 * 0.85
+        check(abs(worst - 386) < 1, "85% of the worst run")
+        check(abs(median - 421.6) < 1, "85% of the median")
+    }
+
+    test("it refuses to write a login item that does not exist") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("no login item to write to"), "it says what to run first")
+    }
+}

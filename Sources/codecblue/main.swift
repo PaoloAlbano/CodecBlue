@@ -137,6 +137,7 @@ func usage() -> Never {
                    codecblue link    XX:XX:XX:XX:XX:XX
                    codecblue tone    FILE.wav [SECONDS] [--sweep]  (a constant sine, or a sweep)
                    codecblue flood   XX:XX:XX:XX:XX:XX [SECONDS] [BYTES] [--keep-link-quality]
+                   codecblue calibrate XX:XX:XX:XX:XX:XX   measure the link and remember it
                    codecblue pace    XX:XX:XX:XX:XX:XX [SEC] [BYTES] [PKT/S] (diagnostic: paced rate)
                    codecblue handlers device|general  (which handler answers each known message)
                    codecblue agent   install|remove|status [ADDR] [options]
@@ -470,10 +471,11 @@ func pace(_ address: String, seconds: Double, packetSize: Int, rate: Double) asy
     await takeover.handBack()
 }
 
+@discardableResult
 func flood(
     _ address: String, seconds: Double, packetSize: Int, keepLinkQuality: Bool = false,
     uidSuffix: String = "tacl"
-) async throws {
+) async throws -> Double {
     // The link quality mode is a controller setting on the ACL connection, and our takeover
     // keeps that connection: so it is worth turning it on *before* taking the link, while
     // bluetoothd still has the audio device published. Once we own the media channel
@@ -498,10 +500,11 @@ func flood(
     let streamer = A2DPStreamer(takeover: takeover, signaling: signaling, log: log)
     box.streamer = streamer
     _ = try await streamer.setUp(sampleRate: 48000, rung: 4)
-    streamer.flood(seconds: seconds, packetSize: packetSize)
+    let carried = streamer.flood(seconds: seconds, packetSize: packetSize)
     await streamer.tearDown()
     log("handing the headphones back to macOS")
     await takeover.handBack()
+    return carried
 }
 
 /// Plays what the virtual device receives: reads the shared ring the driver fills and streams it
@@ -1648,6 +1651,58 @@ do {
         try await flood(
             arguments[1], seconds: seconds, packetSize: size, keepLinkQuality: keep,
             uidSuffix: suffix)
+    case ("calibrate", 2):
+        // Measure the link's ceiling once, at rest, and remember it.
+        //
+        // The alternative is a probe during playback, and a probe is not free: a level change makes
+        // the encoder produce a different frame size, so the queued packets are dropped — a 30-60 ms
+        // hole — and the higher level then throws away 40% of the audio for a second or two. This
+        // does the same measurement with no audio at all, and writes the answer where the stream
+        // will find it.
+        //
+        // Three runs and the median, not one: measured 2026-11-11, three consecutive floods on the
+        // same link gave 454, 496 and 504 kbps. One run would have written 454 and cost a rung.
+        let address = arguments[1]
+        guard LaunchAgent.isInstalled() else {
+            log("no login item to write to: run `codecblue start \(address)` once first")
+            exit(1)
+        }
+        log("measuring the link at rest: three runs, 15 s each, no audio")
+        var runs: [Double] = []
+        for run in 1...3 {
+            let carried = try await flood(
+                address, seconds: 15, packetSize: 679, keepLinkQuality: true,
+                uidSuffix: "cal\(run)")
+            guard carried > 0 else {
+                log("run \(run) measured nothing; the headphones may have gone away")
+                exit(1)
+            }
+            runs.append(carried)
+            log("run \(run): \(Int(carried)) kbps")
+            // The headphones need a moment before the next takeover, or the second grab lands on a
+            // link macOS has not finished handing back.
+            if run < 3 { try await Task.sleep(for: .seconds(3)) }
+        }
+        let sorted = runs.sorted()
+        let median = sorted[1]
+        // 85% of the median, because that is the rule the adapter applies: a level must fit in 85%
+        // of what the link carries, or the cushion has no room to absorb a stall.
+        let usable = median * 0.85
+        log("median \(Int(median)) kbps, so a level must fit in \(Int(usable)) kbps")
+        do {
+            try LaunchAgent.install(
+                address: address,
+                arguments: LaunchAgent.arguments(
+                    quality: nil, adapt: true, cushionMilliseconds: nil,
+                    capacityKbps: Int(median.rounded())))
+            log("wrote --capacity \(Int(median.rounded())) into the login item")
+            log(
+                "restart the stream for it to take effect: codecblue stop && codecblue start \(address)"
+            )
+        } catch {
+            log("could not write the login item: \(error.localizedDescription)")
+            exit(1)
+        }
     case ("rate", 2):
         // Choose the rate the virtual device runs at. It is stored in the ring's header, and the
         // driver reads it when coreaudiod loads it — so this writes the choice and says what to

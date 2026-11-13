@@ -1298,8 +1298,14 @@ public final class A2DPStreamer: @unchecked Sendable {
                 Double(bytes) * 8 / total / 1000))
     }
 
-    public func flood(seconds: TimeInterval, packetSize: Int) {
-        guard let media else { return }
+    /// Floods the media channel and returns what the link carried, in kbit/s.
+    ///
+    /// Returns the figure rather than only logging it, because `codecblue calibrate` needs it: the
+    /// number is the whole point of the measurement, and parsing it back out of a log line would be
+    /// a second place to keep the format correct.
+    @discardableResult
+    public func flood(seconds: TimeInterval, packetSize: Int) -> Double {
+        guard let media else { return 0 }
         // No LDAC here, so no libldac minimum: any size the media MTU allows.
         let size = min(max(64, packetSize), media.mtu)
         let payload =
@@ -1326,7 +1332,7 @@ public final class A2DPStreamer: @unchecked Sendable {
                 usleep(500)
             case .closed:
                 log("flood: media channel closed by the headphones")
-                return
+                return 0
             }
             let now = DispatchTime.now().uptimeNanoseconds
             if Double(now - lastReport) / 1e9 >= 1 {
@@ -1345,10 +1351,12 @@ public final class A2DPStreamer: @unchecked Sendable {
             }
         }
         let total = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
+        let kbps = Double(bytes) * 8 / total / 1000
         log(
             String(
                 format: "flood: %d packets in %.1f s = %.0f packets/s, %.0f kbps, %d refused",
-                sent, total, Double(sent) / total, Double(bytes) * 8 / total / 1000, refused))
+                sent, total, Double(sent) / total, kbps, refused))
+        return kbps
     }
 
     public func stop() { state.stopped = true }
