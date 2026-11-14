@@ -125,6 +125,7 @@ func usage() -> Never {
                                     [--no-hfp] [--no-avrcp] [--low-latency] [--keep-link-quality] [--adapt] [--gain X]
                                     [--report-ms N] [--capacity KBPS]
                    codecblue system  XX:XX:XX:XX:XX:XX [--quality HQ|SQ|LQ|0-4] [--queue-ms N]
+                                    [--ring-ms N] [--capacity KBPS]
                                     (plays the CodecBlue virtual device)
                    codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
                    codecblue devices                      (the headphones macOS knows about)
@@ -627,6 +628,9 @@ func playSystemSession(
     var handBackWait = 3.0
     /// A ceiling measured at rest, from `--capacity`. Same meaning as in `play`.
     var knownCapacityKbps = 0.0
+    /// How deep the ring is held, in milliseconds. The default is the measured 100 ms; see
+    /// `ringTarget` below for what it is for and what lowering it costs.
+    var ringMilliseconds = 100.0
     var rest = options[...]
     while let option = rest.popFirst() {
         switch option {
@@ -650,6 +654,14 @@ func playSystemSession(
             guard let value = rest.popFirst(), let packets = Int(value), packets >= 1, packets <= 64
             else { usage() }
             sendBufferPackets = packets
+        case "--ring-ms":
+            // How deep the ring is held, which is the latency a listener can actually hear and the
+            // half of it that was never adjustable. See `ringTarget` for why 100 ms is the default
+            // and why lowering it is a trade rather than an improvement.
+            guard let value = rest.popFirst(), let ms = Double(value), ms >= 20, ms <= 500 else {
+                usage()
+            }
+            ringMilliseconds = ms
         case "--keep-link-quality": keepLinkQuality = true
         case "--no-keep-link-quality": keepLinkQuality = false
         case "--adapt": adapt = true
@@ -1172,7 +1184,12 @@ func playSystemSession(
     // The ring's median depth was 1 946 frames (44 ms) against a 40 ms target, so the servo was
     // holding it *at* the boundary rather than above it. 100 ms gives the writer's jitter 60 ms of
     // room and costs 60 ms of latency, which is the honest trade: a plateau is worse than a delay.
-    let ringTarget = 0.10
+    //
+    // It is an option and not a constant because it is half the latency and the only half that can
+    // be moved without risking a stall: the cushion is the link's, this is the writer's. Measured
+    // 2026-11-14, the total was ~162 ms (100 ring + 60 cushion), and the plateaus that forced the
+    // 100 are gone — so the trade is worth re-testing by ear rather than by argument.
+    let ringTarget = ringMilliseconds / 1000
     streamer.drainBoost = {
         let depth = ring.available
         let target = Int(ringTarget * Double(ring.sampleRate))
@@ -2110,7 +2127,7 @@ func start(_ arguments: [String]) async throws {
             // stream to a headphone called "449".
             if [
                 "--quality", "--queue-ms", "--media-mtu", "--media-priority", "--sndbuf-packets",
-                "--capacity", "--report-ms",
+                "--capacity", "--report-ms", "--ring-ms",
             ].contains(argument), let value = rest.popFirst() {
                 options.append(value)
             }
@@ -2197,6 +2214,14 @@ func start(_ arguments: [String]) async throws {
     if !options.contains("--quality"), let known = LaunchAgent.knownArgument("--quality") {
         options += ["--quality", known]
         log("keeping the chosen level from the login item: rung \(known)")
+    }
+    // And the ring's depth, for the same reason. It is the one setting a listener changes by ear
+    // while testing latency, so losing it to a `start` that did not mention it would undo the
+    // experiment silently — the stream would come back 60 ms later than the last one and nothing
+    // would say so.
+    if !options.contains("--ring-ms"), let known = LaunchAgent.knownArgument("--ring-ms") {
+        options += ["--ring-ms", known]
+        log("keeping the ring depth from the login item: \(known) ms")
     }
 
     // The same two steps the menu does, in the same order: write the plist, then load it.

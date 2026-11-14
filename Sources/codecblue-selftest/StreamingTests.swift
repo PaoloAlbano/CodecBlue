@@ -4151,3 +4151,68 @@ func releaseNotesTests() {
         check(body.contains("no commits in $range"), "an empty range is not published as nothing")
     }
 }
+
+/// The ring's depth is half the latency, and the half that can be moved.
+///
+/// Measured 2026-11-14: the total was ~162 ms — 100 ms of ring plus 60 ms of cushion. The ring's
+/// 100 was forced by the short-read plateaus of 2026-11-10 (462 windows in 8 656, 2 980 ms of
+/// repeated sample, heard as crackle), and those are gone. So the trade is worth re-testing by ear
+/// rather than by argument, which means it has to be adjustable and it has to survive a restart.
+func ringDepthTests() {
+    test("--ring-ms exists in both parsers") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        // `play` and `system` have separate parsers, and an option in only one of them is a
+        // setting that works until the agent restarts itself.
+        let occurrences = body.components(separatedBy: "case \"--ring-ms\":").count - 1
+        check(
+            occurrences == 1,
+            "the option is parsed (system is the one that matters): \(occurrences)")
+        check(body.contains("var ringMilliseconds = 100.0"), "the default is the measured 100 ms")
+        check(
+            body.contains("let ringTarget = ringMilliseconds / 1000"),
+            "and it is what the ring chases")
+    }
+
+    test("--ring-ms is an option with a value, not an address") {
+        // The same hole `--capacity` had: an unconsumed value falls through to the address branch,
+        // and `start ADDR --ring-ms 60` would stream to a headphone called "60".
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        guard let contains = body.range(of: ".contains(argument), let value = rest.popFirst()"),
+            let open = body[..<contains.lowerBound].range(of: "if [", options: .backwards)
+        else {
+            check(false, "the list of value-taking options is present")
+            return
+        }
+        let list = String(body[open.upperBound..<contains.lowerBound])
+        check(list.contains("\"--ring-ms\""), "the list includes --ring-ms: \(list)")
+    }
+
+    test("the ring depth survives a start and a level change") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("LaunchAgent.knownArgument(\"--ring-ms\")"), "start reads it back")
+        check(body.contains("keeping the ring depth from the login item"), "and says so")
+        let model = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        check(
+            (model ?? "").contains("ringMilliseconds: LaunchAgent.knownArgument"),
+            "the menu keeps it")
+    }
+
+    test("the plist writer emits the ring only when it was chosen") {
+        // Absent means the measured default, so a plist written before this option existed keeps
+        // working — and `--ring-ms 0` is not a ring of zero, it is "not set".
+        let with = LaunchAgent.arguments(
+            quality: "4", adapt: true, cushionMilliseconds: 60, capacityKbps: 485,
+            ringMilliseconds: 60)
+        check(with.contains("--ring-ms") && with.contains("60"), "\(with)")
+        let without = LaunchAgent.arguments(
+            quality: "4", adapt: true, cushionMilliseconds: 60, capacityKbps: 485)
+        check(!without.contains("--ring-ms"), "absent when not chosen: \(without)")
+        let zero = LaunchAgent.arguments(
+            quality: "4", adapt: true, cushionMilliseconds: 60, ringMilliseconds: 0)
+        check(!zero.contains("--ring-ms"), "and zero is not written: \(zero)")
+    }
+}

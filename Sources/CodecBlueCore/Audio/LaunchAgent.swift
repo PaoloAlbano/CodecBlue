@@ -101,13 +101,19 @@ public enum LaunchAgent {
     /// makes the ceiling safe. `--no-adapt` is written only when the listener turned the adapter
     /// off on purpose.
     public static func arguments(
-        quality: String?, adapt: Bool, cushionMilliseconds: Int?, capacityKbps: Int? = nil
+        quality: String?, adapt: Bool, cushionMilliseconds: Int?, capacityKbps: Int? = nil,
+        ringMilliseconds: Int? = nil
     ) -> [String] {
         var out: [String] = []
         if let quality { out += ["--quality", quality] }
         if !adapt { out += ["--no-adapt"] }
         if let cushionMilliseconds, cushionMilliseconds > 0 {
             out += ["--queue-ms", String(cushionMilliseconds)]
+        }
+        // The ring's depth, which is the other half of the latency. Absent means the measured
+        // default (100 ms), so a plist written before this option existed keeps working.
+        if let ringMilliseconds, ringMilliseconds > 0 {
+            out += ["--ring-ms", String(ringMilliseconds)]
         }
         // A ceiling measured once, at rest, and remembered.
         //

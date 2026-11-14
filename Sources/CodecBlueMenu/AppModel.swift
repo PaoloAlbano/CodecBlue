@@ -397,7 +397,11 @@ final class AppModel: ObservableObject {
                     // `codecblue flood` and belongs to the machine. Rebuilding the argument list
                     // without it would erase the measurement on the first level change, and the
                     // menu would go back to learning the ceiling by dropping audio.
-                    capacityKbps: LaunchAgent.knownCapacityKbps()))
+                    capacityKbps: LaunchAgent.knownCapacityKbps(),
+                    // Same rule for the ring depth, which is set by hand from the command line
+                    // while testing latency: a level change must not quietly put it back to the
+                    // default and make the next comparison measure a different stream.
+                    ringMilliseconds: LaunchAgent.knownArgument("--ring-ms").flatMap(Int.init)))
         } catch {
             note = "could not remember the setting: \(error.localizedDescription)"
         }
