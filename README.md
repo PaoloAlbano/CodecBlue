@@ -37,7 +37,9 @@ kernel extensions, no root daemon — and no proprietary app deciding which code
 > device and every app plays through it in LDAC — no root, no kernel extension, no daemon.
 > Measured on 2026-11-07 with Huawei FreeBuds 5 on a MacBook's built-in controller: 336 kbps
 > of LDAC, 0% of audio dropped, 0 skips, cushion 40 ms, ~60 ms of latency added by this
-> program, verified by ear.
+> program, verified by ear. Re-measured on 2026-11-14: **78 ms** end to end, with the ring at
+> 20 ms and 0 short reads over a minute — see [Latency](#latency) for what each number is and
+> how to find yours.
 >
 > The level is not a switch between three names. libldac has **five** bitrates — 990, 660,
 > 492, 396 and 330 kbps at 48 kHz — and Sony named only three of them. CodecBlue measures what
@@ -219,6 +221,22 @@ comparison is not a guess.
 for a minute with 0 short reads and 0 skips. So the default here is still 100 — the safe number for
 a link nobody has listened to — and 20 is what this link turned out to carry. `codecblue ring 20`
 remembers it.
+
+**The default is 100 ms, and that is deliberate.** A release ships the safe number, because a
+buffer tuned for one pair of headphones on one desk is not a default: a link that carries less, or
+a room with more interference, needs more room. The 20 ms above is what *this* link turned out to
+carry after being asked. Finding yours costs four commands and a minute of listening:
+
+```sh
+codecblue ring 60    # listen for 20 s
+codecblue ring 40    # listen again
+codecblue ring 30
+codecblue ring 20
+```
+
+Stop at the first one that crackles and go back one step. `codecblue status` shows `latency_ms`
+after each, so the comparison is a number rather than an impression. If you are unsure between two,
+keep the higher: a plateau you hear once in a while is worse than 20 ms.
 
 ## Using it
 
