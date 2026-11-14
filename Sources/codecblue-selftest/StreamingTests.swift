@@ -4435,6 +4435,23 @@ func daemonUptimeTests() {
         check(t.contains("This is the daemon's fault"), "and whose fault it is not")
     }
 
+    test("an old daemon that answers is not a fault") {
+        // Measured 2026-11-14, on the first run: doctor printed "check-in answers" and then, two
+        // lines later, "this is the likely cause", because the daemon was 3d 4h old and the
+        // threshold is three days. Both cannot be true. A diagnostic that cries wolf is a
+        // diagnostic people learn to ignore.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        // The age may only produce a verdict inside the `!answered` branch, and a note otherwise.
+        check(
+            body.contains("} else if let age, age.isSuspiciouslyOld {"),
+            "the answering case is a note")
+        check(body.contains("Nothing is wrong; this is"), "and says so in words")
+        check(
+            body.contains("if verdicts.isEmpty {\n        for note in notes"),
+            "notes only without verdicts")
+    }
+
     test("doctor reports without fixing") {
         // A killall from inside the stream would drop every other Bluetooth device on the machine
         // to rescue one, which rule 4 forbids.

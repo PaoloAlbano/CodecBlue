@@ -167,16 +167,17 @@ func usage() -> Never {
 /// the command instead, and says what it costs.
 func doctor() async -> Never {
     var verdicts: [String] = []
+    var notes: [String] = []
 
-    if let age = DaemonUptime.current() {
+    // The uptime is read first so it can be printed beside the answer, but it is *not* a verdict on
+    // its own. Measured 2026-11-14, on the first run of this command: it printed "check-in answers"
+    // and then, two lines later, "this is the likely cause" — because the daemon was 3d 4h old and
+    // the threshold is three days. Both statements cannot be true. A daemon that answers is not
+    // broken, however long it has been up; the age only matters once it stops answering, and even
+    // then it is a correlation with one observation behind it.
+    let age = DaemonUptime.current()
+    if let age {
         print("bluetoothd   up \(age.humanAge)  (pid \(age.pid))")
-        if age.isSuspiciouslyOld {
-            verdicts.append(
-                "bluetoothd has been up \(age.humanAge). Measured 2026-11-13: at five days it "
-                    + "stopped answering the check-in while macOS still showed the headphones "
-                    + "connected. If streams are failing with `bluetoothd did not answer`, this is "
-                    + "the likely cause.")
-        }
     } else {
         print("bluetoothd   not running")
         verdicts.append("bluetoothd is not running, so nothing Bluetooth can work.")
@@ -188,11 +189,31 @@ func doctor() async -> Never {
     do { try await session.start() } catch { answered = false }
     session.invalidate()
     print("check-in     \(answered ? "answers" : "does NOT answer")")
+
     if !answered {
-        verdicts.append(
-            "bluetoothd does not answer the check-in. `sudo killall bluetoothd` restarts it: it "
-                + "comes back in about a second, every Bluetooth device reconnects, and this is "
-                + "the fix for the 2026-11-13 hang. It is not a fix for anything else.")
+        // Now the age is worth something, because there is a failure to explain.
+        if let age, age.isSuspiciouslyOld {
+            verdicts.append(
+                "bluetoothd does not answer the check-in, and has been up \(age.humanAge). "
+                    + "Measured 2026-11-13: at five days it stopped answering while macOS still "
+                    + "showed the headphones connected. This is the same fault, and "
+                    + "`sudo killall bluetoothd` is the fix: it comes back in about a second and "
+                    + "every Bluetooth device reconnects.")
+        } else {
+            verdicts.append(
+                "bluetoothd does not answer the check-in. `sudo killall bluetoothd` restarts it: it "
+                    + "comes back in about a second, every Bluetooth device reconnects. If the "
+                    + "daemon is young, the cause is something else — a pending permission prompt, "
+                    + "or a service that failed to start — and restarting it is still the first "
+                    + "thing to try.")
+        }
+    } else if let age, age.isSuspiciouslyOld {
+        // Answering, but old. This is a note and not a verdict: nothing is wrong right now, and
+        // saying otherwise is how a diagnostic teaches people to ignore it.
+        notes.append(
+            "bluetoothd has been up \(age.humanAge) and is answering. Nothing is wrong; this is "
+                + "the state that preceded the 2026-11-13 hang, at five days. If a stream starts "
+                + "failing with `bluetoothd did not answer`, this line is the number to report.")
     }
 
     let devices = BluetoothHeadphone.audioDevices()
@@ -221,6 +242,11 @@ func doctor() async -> Never {
         print("nothing looks wrong from here.")
     } else {
         for verdict in verdicts { print("· " + verdict) }
+    }
+    // Notes come after the verdicts, and only when there is no verdict: a "by the way" under a
+    // real problem is noise.
+    if verdicts.isEmpty {
+        for note in notes { print("· " + note) }
     }
     exit(0)
 }
