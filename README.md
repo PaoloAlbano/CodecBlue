@@ -8,6 +8,9 @@
   <a href="https://github.com/PaoloAlbano/CodecBlue/actions/workflows/ci.yml"><img
     src="https://github.com/PaoloAlbano/CodecBlue/actions/workflows/ci.yml/badge.svg"
     alt="CI"></a>
+  <a href="https://github.com/PaoloAlbano/CodecBlue/releases/latest"><img
+    src="https://img.shields.io/github/v/release/PaoloAlbano/CodecBlue?label=release"
+    alt="Latest release"></a>
   <img src="https://img.shields.io/badge/macOS-14.2%2B-blue" alt="macOS 14.2 or later">
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-blue" alt="Apple Silicon">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
@@ -20,11 +23,10 @@
 </p>
 
 <!--
-  Deliberately absent: a Release badge and a "latest release" badge. There is no release yet — the
-  v0.1.0 tag was pushed on 2026-11-09 and the workflow failed on it (`swift build --product A
-  --product B` builds only B, so the archive was never assembled), so both badges would render
-  broken. They go back the moment a tag produces an archive; a badge that says "no releases" on the
-  front page of a project is worse than no badge.
+  The release badge was left out until 2026-11-14, when v0.2.0 became the first tag to produce an
+  archive: the v0.1.0 tag of 2026-11-09 failed, because `swift build --product A --product B` builds
+  only B and the archive was never assembled. A badge that says "no releases" on the front page of a
+  project is worse than no badge, so it went back only once there was something to point at.
 -->
 
 **Hi-res Bluetooth audio for the Mac.** CodecBlue streams your Mac's audio to Bluetooth

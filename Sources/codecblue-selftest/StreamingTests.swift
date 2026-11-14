@@ -4125,3 +4125,29 @@ func bumpTests() {
         check(body.contains("DRY_RUN_FLAG"), "and a dry run, because a tag cannot be untagged")
     }
 }
+
+/// The release notes have to name the previous release, and "previous" means by version.
+///
+/// Measured 2026-11-14, on the first release that ever produced an archive: v0.2.0 published 41
+/// commits under the heading "First release". The workflow asked
+/// `git describe --tags --abbrev=0 HEAD^`, which answers "the nearest tag behind this commit" —
+/// right only while the history is linear. v0.1.0 was tagged on 2026-11-09 and the history was
+/// rewritten afterwards (squashed, reworded, re-dated), so v0.1.0 is no longer an ancestor of
+/// anything and describe found nothing.
+func releaseNotesTests() {
+    test("the previous release is found by version, not by ancestry") {
+        let workflow = try? String(contentsOfFile: ".github/workflows/release.yml", encoding: .utf8)
+        let body = workflow ?? ""
+        check(body.contains("git tag -l 'v[0-9]*.[0-9]*.[0-9]*'"), "it sorts the version tags")
+        check(body.contains("sort -t. -k1,1n -k2,2n -k3,3n"), "numerically")
+        check(!body.contains("previous=$(git describe"), "describe is not asked")
+    }
+
+    test("a rewritten history is detected and said out loud") {
+        let workflow = try? String(contentsOfFile: ".github/workflows/release.yml", encoding: .utf8)
+        let body = workflow ?? ""
+        check(body.contains("git merge-base --is-ancestor"), "ancestry is checked")
+        check(body.contains("the history was rewritten"), "and the log says why the range is odd")
+        check(body.contains("no commits in $range"), "an empty range is not published as nothing")
+    }
+}

@@ -98,10 +98,35 @@ jobs:
           # The notes are the commit subjects since the previous tag, which is the only changelog
           # that cannot drift from the code. `git describe --tags --abbrev=0 HEAD^` finds the tag
           # before this one; on the first release there is none and the whole history is the notes.
-          previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          # The previous release, and "previous" means by version, not by ancestry.
+          #
+          # `git describe --tags --abbrev=0 HEAD^` answers "the nearest tag behind this commit",
+          # which is the right answer only while the history is linear. It stopped being right on
+          # 2026-11-14: v0.1.0 was tagged on 2026-11-09 and the history was rewritten afterwards
+          # (squashed, reworded, re-dated), so v0.1.0 is no longer an ancestor of anything. The
+          # first real release therefore published 41 commits under the heading "First release" —
+          # honest about what it could see, and wrong about what had happened.
+          #
+          # Sorting the version tags is the answer that does not depend on the shape of the graph.
+          previous=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' \
+            | sort -t. -k1,1n -k2,2n -k3,3n | grep -v "^${version}$" | tail -1)
           if [ -n "$previous" ]; then
-            range="${previous}..HEAD"
-            heading="Changes since ${previous}"
+            heading="Changes since v${previous}"
+            # The commits, when the old tag is still in this history; and when it is not — after a
+            # rewrite — everything up to the previous version's date, which is the closest thing to
+            # a true answer that a rewritten history allows.
+            if git merge-base --is-ancestor "v${previous}" HEAD 2>/dev/null; then
+              range="v${previous}..HEAD"
+            else
+              echo "note: v${previous} is not an ancestor of this tag (the history was rewritten)" >&2
+              range="HEAD"
+            fi
+            # A rewrite can also leave the range empty, which would publish a release with a
+            # heading and no list under it. Say so rather than printing nothing.
+            if [ -z "$(git log --no-merges --pretty=%s "$range")" ]; then
+              echo "note: no commits in $range; listing the whole history instead" >&2
+              range="HEAD"
+            fi
           else
             range="HEAD"
             heading="First release"
