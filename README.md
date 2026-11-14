@@ -187,6 +187,28 @@ made with a Developer ID and opens like any other app.
 shasum -a 256 -c CodecBlue-<version>.zip.sha256
 ```
 
+## Latency
+
+The delay this program adds is two numbers, and they are two different things:
+
+| | Default | What it is |
+|---|---|---|
+| **cushion** | 60 ms, learned | audio encoded and waiting for the link. It widens itself when the link stalls, because a cushion that cannot grow is a cushion that clicks |
+| **ring** | 100 ms | audio the driver has written and the encoder has not read yet. It is a jitter buffer for the writer, not for the link |
+
+Both are adjustable, and both are worth adjusting by ear rather than by argument:
+
+```sh
+codecblue cushion 40                        # while it plays
+codecblue system ADDR --ring-ms 60          # at start
+```
+
+The ring's 100 ms was forced by a real fault — short reads that repeated the last sample, heard
+as crackle, measured on 2026-11-10 as 462 windows out of 8 656 holding 2 980 ms of plateau. That
+fault is fixed, so the number is now a trade rather than a requirement: lower it until it
+crackles, then go back one step. `codecblue status` reports `latency_ms`, which is the sum, so the
+comparison is not a guess.
+
 ## Using it
 
 Open **CodecBlue** from `~/Applications/CodecBlue/` (or run `open ~/Applications/CodecBlue/CodecBlue.app`).
@@ -235,7 +257,8 @@ Without the app, the stream can also be run by hand:
 | `codecblue compare` | This link against the Mac's own AAC, in kbps |
 | `codecblue quality HQ\|SQ\|LQ\|0-4` | The ceiling, while it plays. A level is a limit, not a resting place |
 | `codecblue adapt on\|off` | Let it choose the level itself |
-| `codecblue cushion 40` | The cushion in ms — this is the latency |
+| `codecblue cushion 40` | The cushion in ms — half of the latency |
+| `codecblue system ADDR --ring-ms 60` | The ring's depth — the other half |
 | `codecblue rate 44100\|48000` | The device's sample rate (after a coreaudiod restart) |
 | `codecblue abr` | What this libldac build accepts, measured rather than assumed |
 | `codecblue agent install\|remove\|status` | The LaunchAgent |
