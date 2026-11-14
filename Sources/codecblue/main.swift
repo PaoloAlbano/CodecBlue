@@ -132,7 +132,8 @@ func usage() -> Never {
                    codecblue status                       (ask a running stream what it is doing)
                    codecblue quality HQ|SQ|LQ|0-4         (the ceiling, while it plays)
                    codecblue adapt   on|off               (let it choose the level itself)
-                   codecblue cushion 40                   (the cushion, in ms — this is the latency)
+                   codecblue cushion 40                   (the cushion, in ms — half the latency)
+                   codecblue ring   60                    (the ring, in ms — the other half)
                    codecblue levels                       (the whole ladder, and what fits here)
                    codecblue compare                      (this link against the Mac's own AAC)
                    codecblue link    XX:XX:XX:XX:XX:XX
@@ -860,6 +861,15 @@ func playSystemSession(
     // A way to steer the stream while it runs. Without it the only way to change the quality is
     // to stop, edit the command line and start again — several seconds of silence, which defeats
     // the purpose of a setting you want to try while listening.
+    // The ring's depth, in a box the control channel can reach while the audio plays.
+    //
+    // This is what makes the latency experiment possible at all. Reported 2026-11-14: "as soon as
+    // I run `codecblue start --ring-ms 60` the audio stops and I hear nothing, as if it unplugged
+    // the headphones" — and it did, because `start` writes the plist and reloads the agent, which
+    // stops the stream and hands the headphones back. That is right for `start` and useless for
+    // comparing two buffer depths: the comparison would include a takeover, a fresh link and
+    // several seconds of silence. So the depth is a live setting, like the cushion.
+    let ringClock = CushionClock(ringMilliseconds / 1000)
     let control = ControlServer { command in
         switch command.name {
         case "status":
@@ -897,6 +907,22 @@ func playSystemSession(
             else { return ["error=cushion must be 10…500 (milliseconds)"] }
             streamer.requestedCushion = milliseconds / 1000
             return ["ok cushion=\(Int(milliseconds))ms"]
+        case "ring":
+            // The other half of the latency, and the one that is safe to move: the cushion has to
+            // absorb the link's stalls, the ring only has to be deeper than the encoder's lead.
+            //
+            // It has to be changeable *while playing*, and that is not a convenience. Reported
+            // 2026-11-14: "as soon as I run `codecblue start --ring-ms 60` the audio stops and I
+            // hear nothing, as if it unplugged the headphones" — and it did: `start` writes the
+            // plist and reloads the agent, so it stops the running stream, hands the headphones
+            // back to macOS, and starts a new one. That is the right behaviour for `start` and the
+            // wrong way to compare two buffer depths, because the comparison then includes a
+            // takeover, a fresh link and several seconds of silence.
+            guard let text = command.argument, let milliseconds = Double(text),
+                (20...500).contains(milliseconds)
+            else { return ["error=ring must be 20…500 (milliseconds)"] }
+            ringClock.value = milliseconds / 1000
+            return ["ok ring=\(Int(milliseconds))ms"]
         case "adapt":
             switch command.argument?.lowercased() {
             case "on":
@@ -922,6 +948,10 @@ func playSystemSession(
         out["ring_frames"] = String(ring.available)
         out["ring_ms"] = String(
             format: "%.0f", Double(ring.available) / Double(ring.sampleRate) * 1000)
+        // The depth the servo is aiming for, next to the depth it has reached. Without both, a
+        // latency comparison is a guess: `ring_ms` alone cannot tell "the setting did not take"
+        // from "the servo has not caught up yet".
+        out["ring_target_ms"] = String(format: "%.0f", ringClock.value * 1000)
         // The rung that is playing, by the name Sony gave it where there is one and by its
         // bitrate where there is not: "492" is a real answer and neither HQ nor SQ.
         let rate = streamer.currentSampleRate ?? 48000
@@ -1127,6 +1157,7 @@ func playSystemSession(
     // would arrive later than the budget is worth less than audio that arrives on time.
     let budget: TimeInterval = 0.25
     let cushionSeconds = CushionClock(queueDuration)
+
     // The ring is a live device: the driver writes at the Mac's clock whether or not the link is
     // keeping up, so every stall of `bluetoothd` leaves the ring holding that much extra audio.
     // Nothing used to take it back — reading at exactly real time preserves whatever surplus is
@@ -1189,10 +1220,9 @@ func playSystemSession(
     // be moved without risking a stall: the cushion is the link's, this is the writer's. Measured
     // 2026-11-14, the total was ~162 ms (100 ring + 60 cushion), and the plateaus that forced the
     // 100 are gone — so the trade is worth re-testing by ear rather than by argument.
-    let ringTarget = ringMilliseconds / 1000
     streamer.drainBoost = {
         let depth = ring.available
-        let target = Int(ringTarget * Double(ring.sampleRate))
+        let target = Int(ringClock.value * Double(ring.sampleRate))
         guard target > 0, depth > target else { return 0 }
         let excess = Double(depth - target) / Double(target)
         return min(0.015, excess * 0.02)
@@ -1209,7 +1239,7 @@ func playSystemSession(
     // wrote and simply moved the growing delay into our own ring (measured: 2048 → 2750 frames).
     streamer.paceSlowdown = {
         let depth = ring.available
-        let target = Int(ringTarget * Double(ring.sampleRate))
+        let target = Int(ringClock.value * Double(ring.sampleRate))
         // Target the *full* cushion, not half of it. With the threshold at half, the throttle
         // switched off as soon as the depth reached 40 ms of an 80 ms target, so the cushion
         // settled at half the intended size — measured 2026-11-06: 1024–2688 frames oscillating
@@ -1926,6 +1956,12 @@ do {
         print("    to lower — the audio is dropped instead.")
         print("  · AAC is VBR: its frames shrink when the signal is simple. LDAC's frame length is")
         print("    fixed by the packet type, so its bitrate does not follow the music.")
+    case ("ring", 2):
+        guard let lines = ControlClient.send("ring \(arguments[1])") else {
+            print("no stream is running (nothing at \(ControlServer.defaultPath))")
+            exit(1)
+        }
+        print(lines.joined(separator: "\n"))
     case ("cushion", 2):
         guard let lines = ControlClient.send("cushion \(arguments[1])") else {
             print("no stream is running (nothing at \(ControlServer.defaultPath))")

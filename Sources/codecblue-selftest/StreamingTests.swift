@@ -4170,7 +4170,7 @@ func ringDepthTests() {
             "the option is parsed (system is the one that matters): \(occurrences)")
         check(body.contains("var ringMilliseconds = 100.0"), "the default is the measured 100 ms")
         check(
-            body.contains("let ringTarget = ringMilliseconds / 1000"),
+            body.contains("CushionClock(ringMilliseconds / 1000)"),
             "and it is what the ring chases")
     }
 
@@ -4214,5 +4214,51 @@ func ringDepthTests() {
         let zero = LaunchAgent.arguments(
             quality: "4", adapt: true, cushionMilliseconds: 60, ringMilliseconds: 0)
         check(!zero.contains("--ring-ms"), "and zero is not written: \(zero)")
+    }
+}
+
+/// The ring's depth has to be changeable while the audio plays, because restarting the stream to
+/// change it measures the wrong thing.
+///
+/// Reported 2026-11-14: "as soon as I run `codecblue start --ring-ms 60` the audio stops and I hear
+/// nothing, as if it unplugged the headphones". It did: `start` writes the plist and reloads the
+/// agent, which stops the stream and hands the headphones back to macOS. That is correct for
+/// `start` and useless for comparing two buffer depths, because the comparison then includes a
+/// takeover, a fresh link and several seconds of silence.
+func liveRingTests() {
+    test("the ring is a live setting, not only a start-up option") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("let ringClock = CushionClock"), "the depth lives in a mutable box")
+        check(body.contains("case \"ring\":"), "the control channel accepts it")
+        check(body.contains("ringClock.value = milliseconds / 1000"), "and moves it")
+        check(body.contains("case (\"ring\", 2):"), "there is a verb for it")
+    }
+
+    test("the servo reads the box, not a captured constant") {
+        // A `let` captured by the closures would compile and do nothing: the closures run on the
+        // audio thread, and a constant is a constant.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(!body.contains("let ringTarget = ringMilliseconds / 1000"), "no captured constant")
+        check(body.contains("Int(ringClock.value * Double(ring.sampleRate))"), "the box is read")
+    }
+
+    test("status reports the target as well as the depth") {
+        // Without both, "the setting did not take" and "the servo has not caught up yet" look the
+        // same, and a latency comparison becomes a guess.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("out[\"ring_target_ms\"]"), "the target is published")
+        check(body.contains("out[\"ring_ms\"]"), "next to the depth reached")
+    }
+
+    test("ring and cushion have the same shape of answer") {
+        // Both are the latency, both are changed while playing, both are reported in ms. A user
+        // who learns one should not have to learn the other.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("ok cushion="), "the cushion answers with its value")
+        check(body.contains("ok ring="), "so does the ring")
     }
 }
