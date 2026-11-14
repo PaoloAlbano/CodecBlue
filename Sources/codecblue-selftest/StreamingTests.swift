@@ -4462,3 +4462,133 @@ func daemonUptimeTests() {
         check(!body.contains("killall\" ]"), "it never runs killall itself")
     }
 }
+
+/// The framer that rebuilds AVDTP messages from a stream socket, which had **no** tests.
+///
+/// It is the one piece of protocol code that runs on every message and can be tested without a
+/// socket: `AVDTPFramer.feed` takes bytes and returns messages. Coverage said 0% on
+/// `SignalingChannel`, the only caller — and the framer itself was reached only through it, so the
+/// fragmentation path had never executed once in a test.
+///
+/// Why it matters: an L2CAP channel is a stream, not a packet pipe. A message can arrive in pieces,
+/// and several can arrive in one read. Getting either wrong means a stream that starts and then
+/// dies at the first message the headphones split — which is a bug that would look like the
+/// headphones misbehaving.
+func framerTests() {
+    /// header byte: label<<4 | packetType<<2 | messageType
+    func header(label: UInt8, packet: UInt8, type: UInt8) -> UInt8 {
+        label << 4 | packet << 2 | type
+    }
+
+    test("a single-packet message is decoded") {
+        var framer = AVDTPFramer()
+        // DISCOVER as a command, label 1, no payload.
+        let bytes = Data([header(label: 1, packet: 0, type: 0), AVDTP.Signal.discover.rawValue])
+        let messages = framer.feed(bytes)
+        check(messages.count == 1, "one message: \(messages.count)")
+        check(messages.first?.label == 1, "label")
+        check(messages.first?.type == .command, "type")
+        check(messages.first?.signal == .discover, "signal")
+        check(messages.first?.payload.isEmpty == true, "no payload")
+    }
+
+    test("two fixed-size messages in one read are split") {
+        // The case the fixedPayloadLength table exists for: without it, the second message would
+        // be swallowed as payload of the first.
+        var framer = AVDTPFramer()
+        var bytes = Data([header(label: 1, packet: 0, type: 0), AVDTP.Signal.discover.rawValue])
+        bytes += Data([
+            header(label: 2, packet: 0, type: 0), AVDTP.Signal.getCapabilities.rawValue, 0x21,
+        ])
+        let messages = framer.feed(bytes)
+        check(messages.count == 2, "two messages: \(messages.count)")
+        check(messages.first?.signal == .discover, "the first")
+        check(messages.last?.signal == .getCapabilities, "the second")
+        check(messages.last?.payload == Data([0x21]), "with its one-byte payload")
+    }
+
+    test("a message split across reads is reassembled") {
+        // START carries the packet count; CONTINUE and END carry the rest.
+        var framer = AVDTPFramer()
+        let start = Data([
+            header(label: 3, packet: 1, type: 0), 3, AVDTP.Signal.setConfiguration.rawValue, 0xAA,
+        ])
+        check(framer.feed(start).isEmpty, "nothing complete yet")
+
+        let middle = Data([header(label: 3, packet: 2, type: 0), 0xBB])
+        check(framer.feed(middle).isEmpty, "still nothing")
+
+        let end = Data([header(label: 3, packet: 3, type: 0), 0xCC])
+        let messages = framer.feed(end)
+        check(messages.count == 1, "one message at the end: \(messages.count)")
+        check(
+            messages.first?.payload == Data([0xAA, 0xBB, 0xCC]),
+            "payload rejoined: \(messages.first?.payload ?? Data())")
+        check(messages.first?.label == 3, "label kept")
+        check(messages.first?.signal == .setConfiguration, "signal kept")
+    }
+
+    test("a fragment that never ends does not invent a message") {
+        var framer = AVDTPFramer()
+        let start = Data([
+            header(label: 4, packet: 1, type: 0), 5, AVDTP.Signal.setConfiguration.rawValue, 0x01,
+        ])
+        check(framer.feed(start).isEmpty, "a start alone yields nothing")
+        // A CONTINUE with no END is an incomplete message, not a short one.
+        let middle = Data([header(label: 4, packet: 2, type: 0), 0x02])
+        check(framer.feed(middle).isEmpty, "and a continue alone yields nothing either")
+    }
+
+    test("the fixed-size table answers for the messages that have one") {
+        // Discover has no payload; a command with a SEID has one byte; a delay report has three.
+        check(
+            AVDTPFramer.fixedPayloadLength(signal: AVDTP.Signal.discover.rawValue, type: .command)
+                == 0,
+            "discover carries nothing")
+        check(
+            AVDTPFramer.fixedPayloadLength(
+                signal: AVDTP.Signal.getCapabilities.rawValue, type: .command) == 1,
+            "get capabilities carries a SEID")
+        check(
+            AVDTPFramer.fixedPayloadLength(
+                signal: AVDTP.Signal.delayReport.rawValue, type: .command) == 3,
+            "a delay report carries three bytes")
+        check(
+            AVDTPFramer.fixedPayloadLength(
+                signal: AVDTP.Signal.setConfiguration.rawValue, type: .accept) == 0,
+            "an accept carries nothing")
+        // Variable-length: the framer must fall back to "the rest of the read".
+        check(
+            AVDTPFramer.fixedPayloadLength(
+                signal: AVDTP.Signal.setConfiguration.rawValue, type: .command) == nil,
+            "set configuration as a command is variable")
+    }
+
+    test("a message round-trips through its own encoding") {
+        // `bytes` is what we send; `feed` is what we read. If they disagree, every reply we send is
+        // one the framer would misread.
+        //
+        // The signal has to be one whose payload is *variable*, and the first version of this test
+        // used `open` as an accept — which the specification says carries nothing, so the framer
+        // correctly dropped the byte the encoder had written. The test was constructing a message
+        // that cannot exist, and the failure was the framer being right.
+        var framer = AVDTPFramer()
+        let message = AVDTP.Message(
+            label: 5, type: .command, signal: .setConfiguration, payload: Data([0x01, 0x02]))
+        let decoded = framer.feed(message.bytes)
+        check(decoded.count == 1, "one message back: \(decoded.count)")
+        check(
+            decoded.first == message, "and it is the same one: \(String(describing: decoded.first))"
+        )
+    }
+
+    test("a fixed-size message drops a payload it should not have") {
+        // The other half of the same fact, pinned so nobody "fixes" it later: an accept for OPEN
+        // carries nothing, so a byte after it belongs to the *next* message, not to this one.
+        var framer = AVDTPFramer()
+        let impossible = AVDTP.Message(
+            label: 5, type: .accept, signal: .open, payload: Data([0x01]))
+        let decoded = framer.feed(impossible.bytes)
+        check(decoded.first?.payload.isEmpty == true, "the stray byte is not payload")
+    }
+}
