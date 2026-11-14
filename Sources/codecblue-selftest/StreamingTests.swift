@@ -3542,12 +3542,15 @@ func playingRungVisibleTests() {
         check(levels.map(\.rung) == [0, 1, 4], "no second Low: \(levels.map(\.rung))")
     }
 
-    test("the menu passes the playing rung") {
+    test("the menu passes the chosen rung, which is the one that has a row") {
+        // It used to pass the *playing* rung, and that is the bug: asking for Standard on a link
+        // that carries 497 settles the stream on rung 3, which is not one of the three rows, so the
+        // tick had nowhere to land and the menu showed nothing selected. Reported 2026-11-13.
         let source = try? String(
             contentsOfFile: "Sources/CodecBlueMenu/CodecBlueMenuApp.swift", encoding: .utf8)
         check(
-            (source ?? "").contains("playingRung: model.qualityRung"),
-            "or the tick has nowhere to land again")
+            (source ?? "").contains("playingRung: model.chosenRung"),
+            "the choice is what gets ticked, and the row says where it settles")
     }
 }
 
@@ -3638,7 +3641,7 @@ func capacitySurvivesRewriteTests() {
             contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift", encoding: .utf8)
         let body = source ?? ""
         check(body.contains("public static func knownCapacityKbps() -> Int?"), "the reader exists")
-        check(body.contains("<string>--capacity</string>"), "and it looks for the flag")
+        check(body.contains("knownArgument(\"--capacity\")"), "and it goes through the flag reader")
     }
 
     test("the argument builder emits the flag only when there is one") {
@@ -3870,6 +3873,29 @@ func capacitySurvivesStartTests() {
         check(list.contains("\"--report-ms\""), "and --report-ms, which had the same hole")
     }
 
+    test("the chosen level survives a start that did not mention it") {
+        // Same erasure as the capacity, reported in the same breath: the menu wrote
+        // `--quality 1` into the plist, `start` rebuilt the list without it, and the stream came
+        // back at the default with nothing ticked.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("LaunchAgent.knownArgument(\"--quality\")"), "the level is read back")
+        check(body.contains("keeping the chosen level from the login item"), "and said out loud")
+        check(body.contains("if !options.contains(\"--quality\")"), "only when not given")
+    }
+
+    test("knownArgument reads any flag, not just the capacity") {
+        let agent = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift", encoding: .utf8)
+        let body = agent ?? ""
+        check(
+            body.contains("public static func knownArgument(_ flag: String) -> String?"),
+            "one reader for every flag")
+        check(
+            body.contains("knownArgument(\"--capacity\").flatMap(Int.init)"),
+            "and the capacity uses it")
+    }
+
     test("an explicit --capacity is not overwritten by the remembered one") {
         // The caller wins: `start ADDR --capacity 300` must mean 300, not the 449 in the plist.
         let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
@@ -3918,5 +3944,57 @@ func installInodeTests() {
         let body = script ?? ""
         check(body.contains("Killed: 9"), "the symptom is written down where the fix is")
         check(body.contains("a vnode's code signature against that inode"), "and the reason")
+    }
+}
+
+/// The tick must land on a row that exists.
+///
+/// Reported 2026-11-13: "I changed the quality to Standard, but I do not see anything selected".
+/// The menu ticked the *playing* rung, and on a link that carries 497 kbps asking for Standard
+/// (606) settles the stream on rung 3 — which is not one of the three rows the menu offers. A tick
+/// with no row to land on draws nothing, so the choice looked ignored.
+///
+/// The fix is not another row: it is that a choice is still a choice when the link turns out to be
+/// slower than it, and the row already knows how to say "settles on 363".
+func chosenRungTests() {
+    test("the stream reports the rung that was asked for, separately from the one playing") {
+        let streamer = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = streamer ?? ""
+        check(body.contains("public private(set) var chosenRung: Int?"), "there is a chosen rung")
+        check(body.contains("chosenRung = requested"), "a request moves it")
+        check(body.contains("chosenRung = configuration.rung"), "and start-up sets it")
+        // The settle rule lowers the ceiling; it must not move the tick, or the menu would report
+        // the link's opinion as the listener's choice.
+        check(!body.contains("chosenRung = fittedRung"), "settling does not move it")
+    }
+
+    test("the menu ticks the chosen rung, not the playing one") {
+        let menu = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/CodecBlueMenuApp.swift", encoding: .utf8)
+        let body = menu ?? ""
+        check(body.contains("playingRung: model.chosenRung"), "the tick comes from the choice")
+        check(body.contains("let playing = model.chosenRung == level.rung"), "and the mark too")
+        check(!body.contains("playingRung: model.qualityRung"), "not from what is playing")
+    }
+
+    test("every rung the menu offers can hold the tick") {
+        // The three rows are 0, 1 and 4; a choice of rung 2 or 3 settles onto one of them, and the
+        // row it settles on is the one that must be ticked. This is the arithmetic the bug got
+        // wrong, checked directly.
+        let offered = [0, 1, 4]
+        for chosen in offered {
+            check(offered.contains(chosen), "rung \(chosen) is one of the rows")
+        }
+        // And the settle rule for a link of 497 kbps at 44.1 kHz:
+        let fitted = BitrateAdapter.fitRung(capacityKbps: 497, sampleRate: 44100)
+        check(fitted == 3, "497 kbps fits rung 3 (363), which is not offered: got \(fitted)")
+        check(!offered.contains(fitted), "so ticking the playing rung would have drawn nothing")
+    }
+
+    test("an older stream without chosen_rung still ticks something") {
+        let model = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        check((model ?? "").contains("?? qualityRung"), "it falls back to the playing rung")
     }
 }

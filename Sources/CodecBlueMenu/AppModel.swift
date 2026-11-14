@@ -23,6 +23,14 @@ final class AppModel: ObservableObject {
     /// The rung that is playing, 0…4. `quality` is the name and only three rungs have one, so the
     /// menu needs the number to tick the right entry.
     @Published private(set) var qualityRung = -1
+    /// The rung the listener asked for, which is a ceiling and not where the stream sits.
+    ///
+    /// This is what the menu ticks. It is not `qualityRung`: on a link that carries 497 kbps,
+    /// asking for Standard settles the stream on rung 3, which is not one of the three rows the
+    /// menu offers — so ticking the playing rung drew no tick at all and the choice looked
+    /// ignored. Reported 2026-11-13: "I changed the quality to Standard, but I do not see anything
+    /// selected".
+    @Published private(set) var chosenRung = -1
     /// What the encoder is producing, in kbit/s, from the stream itself.
     @Published private(set) var bitrateKbps = "—"
     @Published private(set) var adapt = false
@@ -279,6 +287,9 @@ final class AppModel: ObservableObject {
         }
         quality = values["quality"] ?? "—"
         qualityRung = Int(values["quality_rung"] ?? "") ?? -1
+        // Falls back to the playing rung when an older stream does not report the choice, so a
+        // menu talking to yesterday's binary still ticks something rather than nothing.
+        chosenRung = Int(values["chosen_rung"] ?? "") ?? qualityRung
         bitrateKbps = values["quality_kbps"] ?? "—"
         adapt = values["adapt"] == "on"
         battery = (values["battery"] ?? "unknown") == "unknown" ? "—" : "\(values["battery"]!)%"

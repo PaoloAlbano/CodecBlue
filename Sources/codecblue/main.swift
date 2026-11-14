@@ -918,6 +918,11 @@ func playSystemSession(
                 LDACEncoder.name(rung: $0, sampleRate: rate)
             } ?? "unknown"
         out["quality_rung"] = streamer.currentRung.map(String.init) ?? "unknown"
+        // The level asked for, which is a ceiling and not where the stream sits. The menu ticks
+        // this one: the settle rule can put the stream on a rung that is not one of the three rows
+        // it offers, and a tick with no row to land on draws nothing — reported 2026-11-13, "I
+        // changed the quality to Standard but I do not see anything selected".
+        out["chosen_rung"] = streamer.chosenRung.map(String.init) ?? "unknown"
         out["quality_kbps"] = streamer.currentBitrateKbps.map(String.init) ?? "unknown"
         out["sample_rate"] = String(streamer.currentSampleRate ?? 48000)
         out["adapt"] = streamer.adaptBitrate ? "on" : "off"
@@ -2184,6 +2189,14 @@ func start(_ arguments: [String]) async throws {
     if !options.contains("--capacity"), let known = LaunchAgent.knownCapacityKbps() {
         options += ["--capacity", String(known)]
         log("keeping the measured capacity from the login item: \(known) kbps")
+    }
+    // And the same for the level, which was erased by the same line of code and reported in the
+    // same breath: "I changed the quality to Standard, but I do not see anything selected". The
+    // menu had written `--quality 1` into the plist; this `start` rebuilt the list without it, the
+    // stream came back up at the default, and the tick had nothing to sit on.
+    if !options.contains("--quality"), let known = LaunchAgent.knownArgument("--quality") {
+        options += ["--quality", known]
+        log("keeping the chosen level from the login item: rung \(known)")
     }
 
     // The same two steps the menu does, in the same order: write the plist, then load it.

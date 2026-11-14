@@ -114,23 +114,31 @@ struct ContentView: View {
                 QualityLevels.menuLevels(
                     capacityKbps: model.linkKbps,
                     sampleRate: model.streamRate,
-                    // So the tick always has a row to land on: the settle rule can put the stream
-                    // on a rung that is not one of the three offered, and a menu with no tick at
-                    // all reads as "your selection did nothing".
-                    playingRung: model.qualityRung), id: \.rung
+                    // The *chosen* rung, not the playing one. The settle rule can put the stream on
+                    // a rung that is not one of the three offered, and ticking that drew nothing at
+                    // all — reported 2026-11-13, "I changed the quality to Standard but I do not
+                    // see anything selected". The listener's choice is still the choice when the
+                    // link turns out to be slower than it; the row says "settles on 363" beside it.
+                    playingRung: model.chosenRung), id: \.rung
             ) { level in
                 Button {
                     model.setQuality("\(level.rung)")
                 } label: {
-                    // The tick follows what is *playing*, not what was asked for: the rung
-                    // settles on its own when the link cannot carry the one chosen.
+                    // The tick follows what was *asked for*, and the row says where that lands.
                     //
-                    // And the number beside a level is the bitrate *it* is producing right now,
-                    // which is not the same as the rung's nominal value: HQ on a link that carries
-                    // 396 is playing 396, and the menu says so. Asked 2026-11-09: "when the stream
-                    // starts the kbps would appear beside them" — beside the level that is
-                    // playing, not beside all three.
-                    let playing = model.qualityRung == level.rung && model.quality != "unknown"
+                    // It used to follow what was playing, and that was wrong in the one case that
+                    // matters: asking for Standard on a link that carries 497 settles the stream
+                    // on rung 3, which is not one of the three rows, so the tick had nowhere to
+                    // land and the menu showed nothing selected. Reported 2026-11-13: "I changed
+                    // the quality to Standard, but I do not see anything selected". The choice did
+                    // not stop being a choice because the link is slow; "settles on 363" beside it
+                    // is the honest way to say both things at once.
+                    //
+                    // The number beside a level is the bitrate *it* is producing right now, which
+                    // is not the rung's nominal value: HQ on a link that carries 396 is playing
+                    // 396, and the menu says so. Asked 2026-11-09: "when the stream starts the kbps
+                    // would appear beside them" — beside the level that is playing, not all three.
+                    let playing = model.chosenRung == level.rung
                     Text(
                         (playing ? "✓ " : "  ")
                             + QualityLevels.menuLabel(

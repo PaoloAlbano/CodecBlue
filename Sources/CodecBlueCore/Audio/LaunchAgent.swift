@@ -173,8 +173,21 @@ public enum LaunchAgent {
     /// to the machine, not to the menu. Without this, changing the level would erase it and the menu
     /// would go back to learning the ceiling by dropping audio, which is heard as crackle.
     public static func knownCapacityKbps() -> Int? {
+        knownArgument("--capacity").flatMap(Int.init)
+    }
+
+    /// Any flag's value already written into the plist, or nil.
+    ///
+    /// Generalised from `knownCapacityKbps` on 2026-11-13, when the same erasure bit a second
+    /// setting: `codecblue start ADDR` rebuilt the argument list from its own command line and
+    /// dropped both the measured `--capacity` and the `--quality` the menu had written, so a
+    /// restart silently went back to the default level and the menu showed nothing selected.
+    ///
+    /// A setting written into the plist is a decision somebody made. A command that did not mention
+    /// it has no business discarding it.
+    public static func knownArgument(_ flag: String) -> String? {
         guard let text = try? String(contentsOf: plistURL, encoding: .utf8),
-            let range = text.range(of: "<string>--capacity</string>")
+            let range = text.range(of: "<string>\(flag)</string>")
         else { return nil }
         // The value is the next <string> after the flag. Parsing the XML properly would mean
         // PropertyListSerialization and a dictionary walk; the file is written by `plist(…)` in this
@@ -183,7 +196,7 @@ public enum LaunchAgent {
         guard let open = rest.range(of: "<string>"),
             let close = rest.range(of: "</string>", range: open.upperBound..<rest.endIndex)
         else { return nil }
-        return Int(rest[open.upperBound..<close.lowerBound])
+        return String(rest[open.upperBound..<close.lowerBound])
     }
 
     /// Whether the plist is on disk, which is what decides whether the next login starts us.

@@ -195,6 +195,18 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// line and never races the codec. It is the rung and not the `Quality`, because two of the
     /// five rungs have no `Quality` case and the status line has to be able to say "492 kbps".
     public private(set) var currentRung: Int?
+    /// The rung the listener *asked for*, which is a ceiling and not where the stream sits.
+    ///
+    /// Reported 2026-11-13: "I changed the quality to Standard, but I do not see anything
+    /// selected". The menu ticked `currentRung`, and on a link that carries 497 kbps asking for
+    /// Standard (606) settles on rung 3 — which is not one of the three rows the menu offers, so
+    /// the tick had no row to land on and drew nothing at all. A menu where the choice you just
+    /// made appears to have done nothing is worse than a menu with no tick.
+    ///
+    /// So this is kept separate from `currentRung` and is only ever moved by a request or by
+    /// start-up: the settle rule lowers the *ceiling* (`adapter.ceilingRung`) but must not move
+    /// the tick, because the listener's choice did not change when the link turned out to be slow.
+    public private(set) var chosenRung: Int?
     /// What the encoder is producing, in kbit/s, as of the last report window.
     public private(set) var currentBitrateKbps: Int?
     /// The rate the encoder is running at, which decides what the three levels are worth: at
@@ -549,6 +561,9 @@ public final class A2DPStreamer: @unchecked Sendable {
         // Starting at the ceiling is what removes the opening glitch: HQ on a link that carries
         // 500 kbps throws away half the audio for the first windows, and that is audible.
         var adapter = BitrateAdapter(ceilingRung: configuration.rung)
+        // The level the stream was started with is also a choice, and the menu must tick it from
+        // the first window rather than showing nothing selected until someone touches the menu.
+        chosenRung = configuration.rung
 
         // A file has an end; the virtual device does not. `total` is only meaningful for a file.
         let total = endless ? Int.max : (totalFrames ?? feed(0).count / 2)
@@ -1032,6 +1047,7 @@ public final class A2DPStreamer: @unchecked Sendable {
                 if let requested = requestedRung {
                     requestedRung = nil
                     adapter.ceilingRung = requested
+                    chosenRung = requested
                     if encoder.rung != requested {
                         encoder.move(toRung: requested)
                         // Drop what is queued. Those packets were encoded at the old level, and
