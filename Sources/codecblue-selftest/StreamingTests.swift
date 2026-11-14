@@ -4309,6 +4309,17 @@ func persistedRingTests() {
 /// had none either. A rule that is checked by a person reading `git log` is a rule that holds until
 /// somebody is in a hurry.
 func commitTrailerTests() {
+    test("the rules about pushing are written down, not remembered") {
+        // Asked 2026-11-14, after an afternoon of pushes, a --force on v0.2.0 and a rebuilt
+        // badges branch that nobody asked for. A rule that lives in the agent's memory lasts
+        // until the next session; one in AGENTS.md is read at the start of every one.
+        let agents = try? String(contentsOfFile: "AGENTS.md", encoding: .utf8)
+        let body = agents ?? ""
+        check(body.contains("Commit, do not push"), "the rule exists")
+        check(body.contains("Never rewrite published history"), "and the one it depends on")
+        check(body.contains("Co-authored-by: DomynAgents"), "and the trailer")
+    }
+
     test("the coverage bot writes the trailer too") {
         let workflow = try? String(contentsOfFile: ".github/workflows/ci.yml", encoding: .utf8)
         let body = workflow ?? ""

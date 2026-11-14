@@ -26,12 +26,14 @@ The repository directory may still be called `ldac_mac`; the project is CodecBlu
 
 ## Releasing
 
-A tag is the whole instruction:
+A tag is the whole instruction — and the owner runs it, not the agent (rule 8):
 
 ```sh
-git tag -a v1.2.0 -m "what changed"
-git push origin v1.2.0
+make bump-patch     # or bump-minor, bump-major: tags and pushes
 ```
+
+`scripts/bump.sh` checks the tree is clean, that we are on `main` and level with `origin`, that
+the tag does not exist yet, and that the version goes up. `DRY_RUN=1` says what it would do.
 
 `.github/workflows/release.yml` then runs `make lint` and `make test`, packages with
 `scripts/package.sh`, and publishes a `.zip` with the binaries already inside. `make release` does
@@ -123,6 +125,18 @@ the app installed, wrong on a runner without it.
 7. **Do not use Swift macros** (`@Observable`, `#Preview`...). Their plugins ship only with
    Xcode, and the build must also work with the Command Line Tools alone. Use
    `ObservableObject`/`@Published` instead.
+8. **Commit, do not push.** Write the commit and stop. The pushes, the tags and the releases
+   are the owner's, because they are the public acts: a push publishes, a tag starts a release,
+   and a rewritten tag breaks anyone who already fetched it. Asked on 2026-11-14, after an
+   afternoon of `git push`, a `--force` on `v0.2.0` and a rebuild of the `badges` branch that
+   nobody had asked for — all of it done while "check the commits have the co-author" was the
+   actual request.
+9. **Never rewrite published history.** A commit inside a tag that has been pushed stays as it
+   is, even if it is wrong: rewriting it changes the hash under a tag somebody may have
+   downloaded. Rewriting unpublished commits is fine, and is what squashing is.
+10. **Every commit carries `Co-authored-by: DomynAgents <no-reply@domyn.com>`.** Including the
+    ones written by CI. A rule checked by a person reading `git log` holds until somebody is in
+    a hurry.
 
 ## Technical facts
 
