@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# Needed by the coverage step, which commits the number to the `badges` branch. Read-only
+# everywhere else: a workflow that can write to the repository should say so at the top.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -29,3 +34,45 @@ jobs:
 
       - name: Build and test
         run: make test
+
+      # The coverage badge has to read its number from somewhere over HTTPS, and shields.io's
+      # "endpoint" badge does that by fetching a small JSON file. So the number lives in the
+      # repository — but on a branch of its own, not on `main`.
+      #
+      # Why not `main`: this repository's history is curated by hand (commits are squashed and
+      # reworded before they are pushed), and a bot committing to `main` on every push would put
+      # a commit in the middle of that every time the number moves by a tenth of a percent. The
+      # badge does not care which branch the file is on, so it goes on `badges`, which nothing
+      # else reads.
+      #
+      # Why not an artifact: artifacts expire after 90 days and need a token to read. A badge that
+      # goes blank is worse than no badge.
+      #
+      # Only on `main`, only on a push: a pull request must not be able to write to the repository.
+      - name: Measure coverage
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: make coverage
+
+      - name: Publish the coverage number
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -eu
+          sh scripts/coverage.sh --update
+          number=$(sh scripts/coverage.sh --json | sed 's/.*"message": "\([^"]*\)".*/\1/')
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # A worktree of the badges branch, so the checkout of `main` is never touched: switching
+          # branches under a running job is how a later step ends up building the wrong tree.
+          git worktree add --force "$RUNNER_TEMP/badges" badges 2>/dev/null \
+            || git worktree add --force -b badges "$RUNNER_TEMP/badges"
+          cp .github/coverage.json "$RUNNER_TEMP/badges/coverage.json"
+          cd "$RUNNER_TEMP/badges"
+          git add coverage.json
+          # Nothing to commit means the number did not move, which is the common case and not a
+          # failure: `git diff --quiet` would exit 1 there and fail the job.
+          if git diff --cached --quiet; then
+            echo "coverage unchanged at $number"
+            exit 0
+          fi
+          git commit -m "coverage: $number"
+          git push origin badges

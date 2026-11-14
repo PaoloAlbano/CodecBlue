@@ -1,6 +1,31 @@
-<img src="Resources/icon.png" width="96" align="right" alt="CodecBlue icon">
+<p align="center">
+  <img src="Resources/icon.png" width="128" alt="CodecBlue icon">
+</p>
 
-# CodecBlue
+<h1 align="center">CodecBlue</h1>
+
+<p align="center">
+  <a href="https://github.com/PaoloAlbano/CodecBlue/actions/workflows/ci.yml"><img
+    src="https://github.com/PaoloAlbano/CodecBlue/actions/workflows/ci.yml/badge.svg"
+    alt="CI"></a>
+  <img src="https://img.shields.io/badge/macOS-14.2%2B-blue" alt="macOS 14.2 or later">
+  <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-blue" alt="Apple Silicon">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
+</p>
+
+<p align="center">
+  <a href="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/PaoloAlbano/CodecBlue/badges/coverage.json"><img
+    src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/PaoloAlbano/CodecBlue/badges/coverage.json"
+    alt="Engine coverage"></a>
+</p>
+
+<!--
+  Deliberately absent: a Release badge and a "latest release" badge. There is no release yet — the
+  v0.1.0 tag was pushed on 2026-11-09 and the workflow failed on it (`swift build --product A
+  --product B` builds only B, so the archive was never assembled), so both badges would render
+  broken. They go back the moment a tag produces an archive; a badge that says "no releases" on the
+  front page of a project is worse than no badge.
+-->
 
 **Hi-res Bluetooth audio for the Mac.** CodecBlue streams your Mac's audio to Bluetooth
 headphones in **LDAC**, using the Mac's built-in Bluetooth. No dongle, no SIP changes, no
@@ -86,6 +111,7 @@ Requirements: Xcode Command Line Tools (Swift 6). Full Xcode is not needed.
 git clone --recurse-submodules https://github.com/PaoloAlbano/CodecBlue.git
 cd CodecBlue
 make check                         # format + lint + build + tests (what CI runs)
+make coverage                      # how much of the engine those tests actually execute
 make release                       # the same .zip a tag publishes, built locally
 .build/debug/codecblue version
 .build/debug/codecblue lookup AA:BB:CC:DD:EE:FF   # what bluetoothd knows about your headphones
@@ -118,6 +144,18 @@ every app plays into it, and nothing feeds it, so the result is silence with no 
 Download the `.zip` from the [releases page](https://github.com/PaoloAlbano/CodecBlue/releases),
 unzip it, and run `./install.sh` inside the folder. It asks for your password once, for the audio
 driver, and nothing else. `./uninstall.sh` undoes it.
+
+Building a release is one command, and a tag is the whole instruction:
+
+```sh
+git tag -a v0.2.0 -m "CodecBlue 0.2.0" && git push origin v0.2.0
+```
+
+The workflow builds, runs the same gate as a normal push, packages the archive, and publishes it
+with the commit subjects since the previous tag as the notes. **No Apple Developer account is
+needed**: without a signing identity in the repository secrets the archive is ad-hoc signed, the
+release notes say so, and the user right-clicks the app once. With one, it is signed, notarised
+and stapled — the same workflow, and nothing else changes.
 
 The archive has the binaries already built — the CLI, the media key helper, the menu bar app and
 the driver — so nothing has to be compiled and no toolchain is needed.
@@ -213,6 +251,7 @@ worse. Testing a link with such a file tests the file. This cost a day.
 | `scripts/build-driver.sh` | Builds the driver, and installs or removes it with `--install` / `--uninstall` |
 | `scripts/build-menu-app.sh` | Assembles `CodecBlueMenu.app` (a bundle is needed for `LSUIElement`) |
 | `scripts/install.sh` | Installs all three pieces, or removes them with `--uninstall` |
+| `scripts/coverage.sh` | Measures how much of the engine the self-test executes (`make coverage`) |
 | `Makefile` | `make check` is the gate CI runs; `make format` rewrites the sources |
 | `notes/findings/` | What was measured and what it proved, including the dead ends |
 | `third_party/libldac/` | AOSP libldac (git submodule, unmodified) |

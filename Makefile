@@ -23,7 +23,7 @@ BIN := .build/debug
 # own resolves frameworks from /System/Library, where a plug-in header does not exist.
 CC := clang -isysroot $(shell xcrun --show-sdk-path)
 
-.PHONY: all build test selftest format lint check menu driver install uninstall release clean distclean help
+.PHONY: all build test selftest format lint check coverage menu driver install uninstall release clean distclean help
 
 all: build
 
@@ -33,6 +33,7 @@ help:
 	@echo "make format     rewrite the Swift sources with swift-format"
 	@echo "make lint       check formatting and compiler warnings without changing anything"
 	@echo "make check      lint, then test — the whole gate, and what CI runs"
+	@echo "make coverage   how much of the engine the self-test actually executes"
 	@echo "make release    build the release archive (.build/dist/CodecBlue-<version>.zip)"
 	@echo "make menu       assemble CodecBlue.app"
 	@echo "make driver     build the virtual output device (no install)"
@@ -62,6 +63,20 @@ test: build
 
 # Kept as an alias because "make selftest" is what one types when looking for the tests.
 selftest: test
+
+# How much of the engine the tests execute, as opposed to how many checks they assert.
+#
+# The check count is the number this project quotes everywhere (1500 and rising), and it is not a
+# coverage number: many of those checks are *source assertions* — "this file contains this rule" —
+# which pass whether or not the rule ever runs. They catch the class of bug this project keeps
+# producing, so they earn their place, but they inflate the count. This target is the other number,
+# and it is lower.
+#
+# Only `Sources/CodecBlueCore` is measured: the CLI, the menu bar app and the driver are thin
+# shells, and a test that needed a running stream would need headphones and a driver — the machine
+# dependency that killed the first CI run.
+coverage:
+	@sh scripts/coverage.sh
 
 # The formatter is the one Apple ships with the toolchain: `xcrun swift-format`. Not swiftlint,
 # not SwiftFormat — this project is built with the Command Line Tools alone, and a tool that has

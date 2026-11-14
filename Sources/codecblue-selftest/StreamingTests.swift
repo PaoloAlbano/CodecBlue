@@ -3998,3 +3998,53 @@ func chosenRungTests() {
         check((model ?? "").contains("?? qualityRung"), "it falls back to the playing rung")
     }
 }
+
+/// The release path has to be checked by something, because the first tag anyone pushed found it
+/// broken and nothing on a laptop could have.
+///
+/// Measured 2026-11-14: `swift build -c release --product codecblue --product codecblue-keys
+/// --product CodecBlueMenu` builds **only the last product**. The release died with
+/// ".build/release/codecblue was not built", and locally the same command appeared to work because
+/// `codecblue` was left over from a build eight days earlier — the worst shape a bug can have:
+/// green on the machine that writes it, and found by the first tag.
+func releasePackagingTests() {
+    test("package.sh asks for one product per build") {
+        let script = try? String(contentsOfFile: "scripts/package.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(
+            body.contains("for product in codecblue codecblue-keys CodecBlueMenu; do"),
+            "there is a loop over the three shipped products")
+        // The bug, written down as the thing that must not come back: two `--product` flags on one
+        // invocation silently builds one of them.
+        check(
+            !body.contains("--product codecblue --product codecblue-keys"),
+            "no single invocation asks for more than one product")
+        check(
+            body.contains("swift build -c release --product \"$product\""),
+            "each product is asked for by name")
+        check(
+            body.contains("[ -x \".build/release/$product\" ]"),
+            "and each is checked for on its own")
+    }
+
+    test("the coverage script reads the line column, not the branch one") {
+        // The header says "Cover" three times — regions, lines, branches — and the first version of
+        // this script took the last one, which is "-" because nothing is instrumented for branches.
+        // It then reported "could not read the total" over a report that was perfectly fine.
+        let script = try? String(contentsOfFile: "scripts/coverage.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("n == 3"), "it takes the third percentage: regions, functions, lines")
+        check(body.contains("sub(/%$/, \"\", $i)"), "and strips the sign before printf sees it")
+        // The header cannot be trusted for a column index either: it splits "Missed Regions" into
+        // two words while the data rows carry one number there, so the header has seventeen fields
+        // and the TOTAL line thirteen. Hence counting percent signs instead.
+        check(body.contains("Any column index derived from the header is off"), "and why")
+    }
+
+    test("coverage is measured on the engine, and says so") {
+        let script = try? String(contentsOfFile: "scripts/coverage.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("Sources/CodecBlueCore"), "only the engine is counted")
+        check(body.contains("what is not counted"), "and the output says what was left out")
+    }
+}

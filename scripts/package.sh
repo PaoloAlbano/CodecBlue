@@ -73,9 +73,15 @@ fi
 # able to break a release.
 say "building (release)…"
 sh scripts/version.sh --write >/dev/null
-swift build -c release --product codecblue --product codecblue-keys --product CodecBlueMenu 2>&1 \
-    | grep -E "error:" && die "build failed"
+# One product per invocation, and this is not fussiness: `swift build --product A --product B`
+# builds **only B**. Measured 2026-11-14 — three products were asked for, only `CodecBlueMenu`
+# appeared, and the release died with ".build/release/codecblue was not built" while the same
+# command on a laptop appeared to work because `codecblue` was left over from a build eight days
+# earlier. That is the worst shape a bug can have: green locally, and the first tag anyone pushes
+# is the one that finds it. The loop below cannot have that failure mode, because each product is
+# asked for by name and then checked for on its own.
 for product in codecblue codecblue-keys CodecBlueMenu; do
+    swift build -c release --product "$product" 2>&1 | grep -E "error:" && die "build failed: $product"
     [ -x ".build/release/$product" ] || die ".build/release/$product was not built"
 done
 

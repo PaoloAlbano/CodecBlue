@@ -5,6 +5,11 @@ build/
 *.driver
 *.dmg
 
+# Coverage profiles. `scripts/coverage.sh` writes them under .build/coverage, but a self-test run
+# by hand with LLVM_PROFILE_FILE unset drops `default.profraw` in the working directory.
+*.profraw
+*.profdata
+
 # macOS / editors
 .DS_Store
 *.xcuserstate
