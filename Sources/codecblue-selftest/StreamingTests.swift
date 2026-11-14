@@ -4196,8 +4196,10 @@ func ringDepthTests() {
         check(body.contains("keeping the ring depth from the login item"), "and says so")
         let model = try? String(
             contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        // The menu now keeps the target it last asked for, and falls back to the plist for a
+        // stream started from the command line.
         check(
-            (model ?? "").contains("ringMilliseconds: LaunchAgent.knownArgument"),
+            (model ?? "").contains("LaunchAgent.knownArgument(\"--ring-ms\")"),
             "the menu keeps it")
     }
 
@@ -4324,5 +4326,55 @@ func commitTrailerTests() {
         let workflow = try? String(contentsOfFile: ".github/workflows/ci.yml", encoding: .utf8)
         let body = workflow ?? ""
         check(body.contains("Co-authored-by: DomynAgents"), "the bot commit carries it")
+    }
+}
+
+/// The menu has to offer the ring, because the ring is the half of the latency a listener can move.
+///
+/// Measured 2026-11-14: 163 ms at ring 100, 78 ms at ring 20 on a 449 kbps link. The menu offered
+/// only the cushion, so the number the listener found by ear was reachable from the command line
+/// and nowhere else.
+func menuRingTests() {
+    test("the Latency menu offers the ring") {
+        let menu = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/CodecBlueMenuApp.swift", encoding: .utf8)
+        let body = menu ?? ""
+        check(body.contains("model.setRing("), "there is a ring control")
+        check(body.contains("ForEach([20, 30, 40, 60, 100]"), "with the ladder worth trying")
+        check(body.contains("ringTargetMilliseconds == depth"), "and a tick on the current one")
+    }
+
+    test("the tick follows the target, not the depth reached") {
+        // The two differ for a second or two after a change, and a menu that ticked the reached
+        // depth would show the previous choice while the servo catches up.
+        let model = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        let body = model ?? ""
+        check(body.contains("var ringTargetMilliseconds = 0"), "the target is its own property")
+        check(
+            body.contains("ringTargetMilliseconds = Int(values[\"ring_target_ms\"]"),
+            "read from status")
+        check(body.contains("ringTargetMilliseconds = milliseconds"), "and set by the control")
+    }
+
+    test("the status line says which number to move") {
+        // "latency 78 ms" answers how much; "latency 78 ms (ring 20, cushion 58)" answers what to
+        // change, which is the next question.
+        let model = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        let body = model ?? ""
+        check(body.contains("split.append(\"ring \\(ringTargetMilliseconds)\")"), "the ring")
+        check(
+            body.contains("split.append(\"cushion \\(cushionMilliseconds)\")"), "and the cushion")
+    }
+
+    test("a level change keeps the ring depth") {
+        let model = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        let body = model ?? ""
+        // Both argument lists: rememberQuality and start.
+        let occurrences =
+            body.components(separatedBy: "ringMilliseconds: ringTargetMilliseconds").count - 1
+        check(occurrences == 2, "both writers carry it: \(occurrences)")
     }
 }

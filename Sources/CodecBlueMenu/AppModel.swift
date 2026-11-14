@@ -45,6 +45,12 @@ final class AppModel: ObservableObject {
     /// The cushion, in milliseconds: the audio held between the driver and the socket. This is
     /// the latency, and it is the number a listener can actually judge.
     @Published private(set) var cushionMilliseconds = 0
+    /// The ring's depth the servo is aiming for, as a number. 0 means "whatever the stream was
+    /// started with", which is the measured default of 100 ms.
+    ///
+    /// Separate from `ringMilliseconds`, which is the depth *reached* and is a display string: the
+    /// two differ for a second or two after a change, and the menu must tick the one it asked for.
+    @Published private(set) var ringTargetMilliseconds = 0
     /// The latency the listener gets: cushion plus whatever is waiting in the ring.
     @Published private(set) var latencyMilliseconds = 0
     /// Whether bluetoothd has the audio device, which is what keeps the link in A2DP Link Quality
@@ -178,7 +184,16 @@ final class AppModel: ObservableObject {
     }
 
     var detailLine: String {
+        // The total, then the two numbers that add up to it. A single figure answers "how much
+        // delay?"; the split answers "which one do I move?", which is the question that follows
+        // immediately — and the cushion and the ring are not interchangeable.
         var parts = ["latency \(latencyMilliseconds) ms"]
+        if cushionMilliseconds > 0 || ringTargetMilliseconds > 0 {
+            var split: [String] = []
+            if ringTargetMilliseconds > 0 { split.append("ring \(ringTargetMilliseconds)") }
+            if cushionMilliseconds > 0 { split.append("cushion \(cushionMilliseconds)") }
+            parts[0] += " (\(split.joined(separator: " + ")))"
+        }
         // The link's measured capacity, when there is one, and only then: "0 kbps" would read as
         // a broken link, and the honest answer before a measurement is silence.
         // The ceiling when it is known, because that is a limit; otherwise the floor, worded as
@@ -295,6 +310,7 @@ final class AppModel: ObservableObject {
         battery = (values["battery"] ?? "unknown") == "unknown" ? "—" : "\(values["battery"]!)%"
         ringMilliseconds = values["ring_ms"] ?? "—"
         cushionMilliseconds = Int(values["cushion_ms"] ?? "0") ?? 0
+        ringTargetMilliseconds = Int(values["ring_target_ms"] ?? "0") ?? 0
         latencyMilliseconds = Int(values["latency_ms"] ?? "0") ?? 0
         skips = values["skips"] ?? "—"
         linkQuality = values["link_quality"] ?? "unknown"
@@ -398,10 +414,14 @@ final class AppModel: ObservableObject {
                     // without it would erase the measurement on the first level change, and the
                     // menu would go back to learning the ceiling by dropping audio.
                     capacityKbps: LaunchAgent.knownCapacityKbps(),
-                    // Same rule for the ring depth, which is set by hand from the command line
-                    // while testing latency: a level change must not quietly put it back to the
-                    // default and make the next comparison measure a different stream.
-                    ringMilliseconds: LaunchAgent.knownArgument("--ring-ms").flatMap(Int.init)))
+                    // And the ring depth, which the listener may have tuned by ear. A level
+                    // change that reset it would silently make the next comparison a different
+                    // stream. `ringTargetMilliseconds` first, because it is what the menu last
+                    // asked for; the plist is the fallback for a stream started from the command
+                    // line.
+                    ringMilliseconds: ringTargetMilliseconds > 0
+                        ? ringTargetMilliseconds
+                        : LaunchAgent.knownArgument("--ring-ms").flatMap(Int.init)))
         } catch {
             note = "could not remember the setting: \(error.localizedDescription)"
         }
@@ -455,7 +475,10 @@ final class AppModel: ObservableObject {
                 arguments: LaunchAgent.arguments(
                     quality: Self.level(quality), adapt: adapt,
                     cushionMilliseconds: cushionMilliseconds,
-                    capacityKbps: LaunchAgent.knownCapacityKbps()))
+                    capacityKbps: LaunchAgent.knownCapacityKbps(),
+                    ringMilliseconds: ringTargetMilliseconds > 0
+                        ? ringTargetMilliseconds
+                        : LaunchAgent.knownArgument("--ring-ms").flatMap(Int.init)))
             try LaunchAgent.load()
             note = nil
         } catch {
@@ -512,6 +535,24 @@ final class AppModel: ObservableObject {
         // The new value is written, not the one the status still reports: the stream has just been
         // told and has not published it yet.
         cushionMilliseconds = milliseconds
+        rememberQuality(quality, adapt: adapt)
+        refresh()
+    }
+
+    /// Changes the ring's depth while the audio plays, then remembers it.
+    ///
+    /// The ring is the half of the latency that is safe to move: the cushion has to absorb the
+    /// link's stalls, the ring only has to be deeper than the encoder's lead. Measured on
+    /// 2026-11-14, 163 ms at 100 down to 78 ms at 20 on a 449 kbps link — but that number belongs
+    /// to that link, so this is a menu and not a default.
+    func setRing(_ milliseconds: Int) {
+        guard let lines = ControlClient.send("ring \(milliseconds)") else {
+            note = "no stream is running"
+            return
+        }
+        if let first = lines.first, first.hasPrefix("error") { note = first }
+        // Written, not read back: the stream has just been told and has not published it yet.
+        ringTargetMilliseconds = milliseconds
         rememberQuality(quality, adapt: adapt)
         refresh()
     }

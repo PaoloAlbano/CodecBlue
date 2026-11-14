@@ -179,6 +179,24 @@ struct ContentView: View {
             }
             Divider()
             Text("It grows by itself when the link stalls")
+            Divider()
+            // The other half of the latency, and the half that is safe to move: the cushion has to
+            // absorb the link's stalls, the ring only has to be deeper than the encoder's lead.
+            //
+            // Measured on 2026-11-14, FreeBuds 5 on a 449 kbps link: 163 ms at 100 down to 78 ms
+            // at 20, with 0 short reads over a minute. Those are this link's numbers, not a
+            // default — a link that carries less needs more room — so the menu offers the ladder
+            // and lets the ear decide.
+            Text("Ring — the other half, safe to move")
+            ForEach([20, 30, 40, 60, 100], id: \.self) { depth in
+                Button {
+                    model.setRing(depth)
+                } label: {
+                    Text(
+                        model.ringTargetMilliseconds == depth
+                            ? "✓ \(depth) ms" : "  \(depth) ms")
+                }
+            }
         }
 
         Menu("Sample rate") {
