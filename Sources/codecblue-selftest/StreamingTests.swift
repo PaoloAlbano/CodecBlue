@@ -4041,6 +4041,24 @@ func releasePackagingTests() {
         check(body.contains("Any column index derived from the header is off"), "and why")
     }
 
+    test("--json prints the document alone, because a caller captures it") {
+        // The first version printed its progress on stdout too, so the JSON that reached the
+        // commit subject on the badges branch read "coverage: building with instrumentation…
+        // running the self-test… 26.6%".
+        let script = try? String(contentsOfFile: "scripts/coverage.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("printf '%s\\n' \"$*\" >&2"), "progress goes to stderr")
+    }
+
+    test("the badges branch is fetched before it is written to") {
+        // It has to start from origin/badges when that exists: the first version created a *new*
+        // branch from main's HEAD, so the second run's push was rejected with "fetch first".
+        let workflow = try? String(contentsOfFile: ".github/workflows/ci.yml", encoding: .utf8)
+        let body = workflow ?? ""
+        check(body.contains("git fetch --quiet origin badges"), "it fetches the remote branch")
+        check(body.contains("-B badges"), "and moves the local one onto it")
+    }
+
     test("coverage is measured on the engine, and says so") {
         let script = try? String(contentsOfFile: "scripts/coverage.sh", encoding: .utf8)
         let body = script ?? ""

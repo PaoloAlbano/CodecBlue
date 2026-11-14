@@ -28,7 +28,11 @@ PROFDATA="$PROFILE_DIR/merged.profdata"
 BINARY=".build/debug/codecblue-selftest"
 JSON="$HERE/.github/coverage.json"
 
-say() { printf '%s\n' "$*"; }
+# Progress goes to stderr, and that is not cosmetic: `--json` exists to be captured by a caller
+# (`$(scripts/coverage.sh --json)`), and the first version printed "building with instrumentation…"
+# on stdout as well, so the JSON that reached the commit message was the progress log followed by
+# the document. Measured 2026-11-14, in a commit subject on the badges branch.
+say() { printf '%s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 command -v xcrun >/dev/null 2>&1 || die "xcrun not found: this needs the Xcode command line tools"

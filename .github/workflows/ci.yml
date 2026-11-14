@@ -58,13 +58,27 @@ jobs:
         run: |
           set -eu
           sh scripts/coverage.sh --update
-          number=$(sh scripts/coverage.sh --json | sed 's/.*"message": "\([^"]*\)".*/\1/')
+          # stderr carries the progress lines, so this captures the JSON document alone. The first
+          # version did not, and the commit subject on the badges branch read "coverage: building
+          # with instrumentation… running the self-test… 26.6%".
+          number=$(sh scripts/coverage.sh --json 2>/dev/null | sed 's/.*"message": "\([^"]*\)".*/\1/')
+          [ -n "$number" ] || { echo "could not read the coverage number" >&2; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # A worktree of the badges branch, so the checkout of `main` is never touched: switching
           # branches under a running job is how a later step ends up building the wrong tree.
-          git worktree add --force "$RUNNER_TEMP/badges" badges 2>/dev/null \
-            || git worktree add --force -b badges "$RUNNER_TEMP/badges"
+          #
+          # It has to start from `origin/badges` when that exists, and the first version did not:
+          # it created a *new* branch called `badges` from main's HEAD, so the push was rejected
+          # with "fetch first" on the second run — the branch had diverged from the remote the
+          # moment the first run created it. `-B` moves an existing local branch onto the remote
+          # one, which is what makes the second run and the hundredth behave like the first.
+          if git fetch --quiet origin badges 2>/dev/null; then
+            git worktree add --force -B badges "$RUNNER_TEMP/badges" origin/badges
+          else
+            echo "no badges branch yet: creating it"
+            git worktree add --force -b badges "$RUNNER_TEMP/badges"
+          fi
           cp .github/coverage.json "$RUNNER_TEMP/badges/coverage.json"
           cd "$RUNNER_TEMP/badges"
           git add coverage.json
