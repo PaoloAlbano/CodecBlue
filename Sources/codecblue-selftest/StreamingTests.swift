@@ -4048,3 +4048,62 @@ func releasePackagingTests() {
         check(body.contains("what is not counted"), "and the output says what was left out")
     }
 }
+
+/// Cutting a release is one act, and the checks around it are the interesting part.
+///
+/// The version lives in the tag and nowhere else — `scripts/version.sh` reads it from there at
+/// build time — so a bump is `git tag` plus `git push`, which is what starts the release workflow.
+/// A commit that only changed a number would be a commit that says nothing.
+func bumpTests() {
+    test("bump.sh bumps the three parts from the highest version tag") {
+        let script = try? String(contentsOfFile: "scripts/bump.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("major | minor | patch"), "it takes the three parts")
+        check(body.contains("major=$((major + 1)); minor=0; patch=0"), "major resets the rest")
+        check(body.contains("minor=$((minor + 1)); patch=0"), "minor resets the patch")
+        check(body.contains("patch=$((patch + 1))"), "patch only moves the patch")
+    }
+
+    test("the version comes from the version tags, not from git describe") {
+        // This repository also carries `backup-before-squash-2` and friends, and `git describe`
+        // happily returns `v0.1.0-3-gabc1234`, which is not a number to bump.
+        let script = try? String(contentsOfFile: "scripts/bump.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("git tag -l 'v[0-9]*.[0-9]*.[0-9]*'"), "only vX.Y.Z tags are read")
+        check(body.contains("sort -t. -k1,1n -k2,2n -k3,3n"), "sorted numerically, not by string")
+        // The comment above the line names `git describe`, so searching for the words proves
+        // nothing; what must not be there is the command being *run* to get the version.
+        check(!body.contains("version=$(git describe"), "describe is not run for the version")
+    }
+
+    test("every way a release goes wrong is refused, not warned about") {
+        let script = try? String(contentsOfFile: "scripts/bump.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("the working tree is not clean"), "a modified tree")
+        check(body.contains("not main"), "a branch that is not main")
+        check(body.contains("behind origin/main"), "main behind the remote")
+        check(body.contains("ahead of origin/main"), "main ahead of the remote")
+        check(body.contains("already exists locally"), "a tag that is already there")
+        check(body.contains("already exists on origin"), "a tag that is already on the remote")
+        check(body.contains("is not greater than"), "a version that goes backwards")
+    }
+
+    test("it asks before publishing, and refuses without a terminal") {
+        // A release cut by a script that never asked is worse than one that refused.
+        let script = try? String(contentsOfFile: "scripts/bump.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("no terminal to confirm on"), "no terminal means no")
+        check(body.contains("[ -t 0 ]"), "asked of the terminal, not of a variable")
+        check(body.contains("git tag -a \"$tag\""), "annotated, so describe and the notes work")
+        check(body.contains("git tag -d \"$tag\""), "a failed push removes the local tag")
+    }
+
+    test("the Makefile exposes the three bumps") {
+        let makefile = try? String(contentsOfFile: "Makefile", encoding: .utf8)
+        let body = makefile ?? ""
+        for part in ["patch", "minor", "major"] {
+            check(body.contains("bump-\(part):"), "bump-\(part) exists")
+        }
+        check(body.contains("DRY_RUN_FLAG"), "and a dry run, because a tag cannot be untagged")
+    }
+}

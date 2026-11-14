@@ -145,11 +145,21 @@ Download the `.zip` from the [releases page](https://github.com/PaoloAlbano/Code
 unzip it, and run `./install.sh` inside the folder. It asks for your password once, for the audio
 driver, and nothing else. `./uninstall.sh` undoes it.
 
-Building a release is one command, and a tag is the whole instruction:
+Building a release is one command:
 
 ```sh
-git tag -a v0.2.0 -m "CodecBlue 0.2.0" && git push origin v0.2.0
+make bump-patch     # 0.1.0 -> 0.1.1
+make bump-minor     # 0.1.0 -> 0.2.0
+make bump-major     # 0.1.0 -> 1.0.0
 ```
+
+Each tags and pushes, which is what starts the release: there is no version file to edit and no
+commit to make, because `scripts/version.sh` reads the version from the tag at build time and the
+committed `GeneratedVersion.swift` says `0.0.0-development` on purpose. The tag *is* the version.
+
+The script refuses rather than warns, because a tag is a promise about a tree: it wants a clean
+tree, on `main`, level with `origin`, a tag that does not exist yet, and a version that goes up.
+`make bump-patch DRY_RUN=1` says what it would do without doing it.
 
 The workflow builds, runs the same gate as a normal push, packages the archive, and publishes it
 with the commit subjects since the previous tag as the notes. **No Apple Developer account is
@@ -252,6 +262,7 @@ worse. Testing a link with such a file tests the file. This cost a day.
 | `scripts/build-menu-app.sh` | Assembles `CodecBlueMenu.app` (a bundle is needed for `LSUIElement`) |
 | `scripts/install.sh` | Installs all three pieces, or removes them with `--uninstall` |
 | `scripts/coverage.sh` | Measures how much of the engine the self-test executes (`make coverage`) |
+| `scripts/bump.sh` | Tags the next version and pushes it (`make bump-patch`, `-minor`, `-major`) |
 | `Makefile` | `make check` is the gate CI runs; `make format` rewrites the sources |
 | `notes/findings/` | What was measured and what it proved, including the dead ends |
 | `third_party/libldac/` | AOSP libldac (git submodule, unmodified) |
