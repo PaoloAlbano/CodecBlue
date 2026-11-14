@@ -1688,9 +1688,21 @@ do {
             log("no login item to write to: run `codecblue start \(address)` once first")
             exit(1)
         }
-        log("measuring the link at rest: three runs, 15 s each, no audio")
+        // Four runs, and the first is thrown away.
+        //
+        // Measured 2026-11-13, and it is the reason this is not three: the first flood after a fresh
+        // takeover reported **933 kbps on a link that carries ~465**, and finished in 11 s instead of
+        // 15. The socket and the headphones absorbed a burst because their buffers were empty, so
+        // the first window measures the buffer, not the link. Four independent floods in a row on
+        // the same link gave 468, 474, 429 and 461 — the 933 is not a fast link, it is a cold one.
+        //
+        // A median does not protect against this, because the outlier is not a minority: it is
+        // always the first run. With `933, 468, 374` the median happened to be right; with
+        // `933, 933, 374` it would have written 933 into the plist, which makes the menu offer HQ to
+        // a link that cannot carry it — the crackle this whole program exists to avoid.
+        log("measuring the link at rest: four runs, 15 s each, no audio, the first discarded")
         var runs: [Double] = []
-        for run in 1...3 {
+        for run in 1...4 {
             let carried = try await flood(
                 address, seconds: 15, packetSize: 679, keepLinkQuality: true,
                 uidSuffix: "cal\(run)")
@@ -1698,14 +1710,27 @@ do {
                 log("run \(run) measured nothing; the headphones may have gone away")
                 exit(1)
             }
-            runs.append(carried)
-            log("run \(run): \(Int(carried)) kbps")
+            if run == 1 {
+                log("run 1: \(Int(carried)) kbps — discarded: the first flood measures the buffers")
+            } else {
+                runs.append(carried)
+                log("run \(run): \(Int(carried)) kbps")
+            }
             // The headphones need a moment before the next takeover, or the second grab lands on a
             // link macOS has not finished handing back.
-            if run < 3 { try await Task.sleep(for: .seconds(3)) }
+            if run < 4 { try await Task.sleep(for: .seconds(3)) }
         }
         let sorted = runs.sorted()
+        // Three kept runs, so the middle one is a real median.
         let median = sorted[1]
+        // A sanity check that would have caught the 933 on its own: no measurement may claim more
+        // than the fastest rung the hardware can be asked for. 990 is LDAC HQ; anything above it is
+        // not a link measurement.
+        if median > 990 {
+            log("median \(Int(median)) kbps is above LDAC's own maximum: the measurement is wrong")
+            log("nothing was written")
+            exit(1)
+        }
         // 85% of the median, because that is the rule the adapter applies: a level must fit in 85%
         // of what the link carries, or the cushion has no room to absorb a stall.
         let usable = median * 0.85
@@ -2074,9 +2099,14 @@ func start(_ arguments: [String]) async throws {
         if argument.hasPrefix("--") {
             options.append(argument)
             // Options that take a value: the value is not an address and must not be read as one.
-            if ["--quality", "--queue-ms", "--media-mtu", "--media-priority", "--sndbuf-packets"]
-                .contains(argument), let value = rest.popFirst()
-            {
+            // `--capacity` belongs in this list, and it was missing: without it the value was not
+            // consumed, fell through to the `address == nil` branch and was read as a device
+            // address. Measured 2026-11-13 — `start 40:DC:… --capacity 449` would have tried to
+            // stream to a headphone called "449".
+            if [
+                "--quality", "--queue-ms", "--media-mtu", "--media-priority", "--sndbuf-packets",
+                "--capacity", "--report-ms",
+            ].contains(argument), let value = rest.popFirst() {
                 options.append(value)
             }
         } else if address == nil {
@@ -2139,6 +2169,21 @@ func start(_ arguments: [String]) async throws {
         }
         log("and macOS did not take them either; check System Settings > Bluetooth")
         exit(1)
+    }
+
+    // A measured capacity survives a `start` that did not mention it.
+    //
+    // Reported 2026-11-13: "I ran start and in the menu I see HQ, LQ and SQ without the settles".
+    // The menu was right to show bare names — its capacity was 0, so there was nothing to settle
+    // *on*. `calibrate` had written `--capacity 449` into the plist, and this `start` rebuilt the
+    // argument list from its own command line, which did not mention it, and erased it.
+    //
+    // The capacity is a fact about the machine, measured once, not an option of the command that
+    // happens to be running. So it is carried forward unless the caller overrides it — the same
+    // rule the menu follows, and the reason `LaunchAgent.knownCapacityKbps` exists.
+    if !options.contains("--capacity"), let known = LaunchAgent.knownCapacityKbps() {
+        options += ["--capacity", String(known)]
+        log("keeping the measured capacity from the login item: \(known) kbps")
     }
 
     // The same two steps the menu does, in the same order: write the plist, then load it.

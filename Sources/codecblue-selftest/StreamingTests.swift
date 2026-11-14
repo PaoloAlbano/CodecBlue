@@ -3717,10 +3717,41 @@ func calibrateTests() {
         let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
         let body = source ?? ""
         check(body.contains("case (\"calibrate\", 2):"), "the command is dispatched")
-        check(body.contains("for run in 1...3"), "three runs")
-        check(body.contains("let median = sorted[1]"), "and the median, not the first")
         check(body.contains("capacityKbps: Int(median.rounded())"), "written into the login item")
         check(body.contains("calibrate XX:XX:XX:XX:XX:XX"), "and in the usage text")
+    }
+
+    test("the first run is discarded, because it measures the buffers") {
+        // Measured 2026-11-13: the first flood after a fresh takeover reported 933 kbps on a link
+        // that carries ~465, and finished in 11 s instead of 15 — the socket and the headphones
+        // absorbed a burst because their buffers were empty. Four floods in a row gave 468, 474,
+        // 429, 461; the 933 is not a fast link, it is a cold one.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("for run in 1...4"), "four runs")
+        check(
+            body.contains("if run == 1") && body.contains("discarded"), "the first is thrown away")
+        check(body.contains("let median = sorted[1]"), "and the median of the three kept")
+    }
+
+    test("a median cannot be a majority of outliers") {
+        // With three runs and one cold outlier the median happened to be right; with two it would
+        // have been 933, which makes the menu offer HQ to a link that cannot carry it.
+        let cold = [933.0, 468.0, 374.0]
+        check(cold.sorted()[1] == 468, "one outlier out of three is survivable")
+        let twoCold = [933.0, 933.0, 374.0]
+        check(
+            twoCold.sorted()[1] == 933, "two are not — which is why the cold one is removed first")
+        // Discarding the first and taking the median of what is left:
+        let kept = [468.0, 374.0, 449.0].sorted()
+        check(kept[1] == 449, "and the kept runs give 449")
+    }
+
+    test("a measurement above LDAC's own maximum is refused") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("if median > 990"), "there is a ceiling on the ceiling")
+        check(body.contains("nothing was written"), "and it writes nothing when it trips")
     }
 
     test("flood returns the number instead of only logging it") {
@@ -3796,5 +3827,96 @@ func bluetoothdTimeoutMessageTests() {
         check(sleeps >= 2, "both branches wait interruptibly: \(sleeps)")
         let grows = body.components(separatedBy: "backoff = min(backoff * 2, 60)").count - 1
         check(grows >= 2, "and both grow the wait: \(grows)")
+    }
+}
+
+/// A measured capacity must survive a `start` that did not mention it.
+///
+/// Reported 2026-11-13: "I ran start and in the menu I see HQ, LQ and SQ without the settles". The
+/// menu was right — its capacity was 0, so there was nothing to settle *on*. `calibrate` had written
+/// `--capacity 449` into the plist, and `start` rebuilt the argument list from its own command line,
+/// which did not mention it, and erased it.
+///
+/// The capacity is a fact about the machine, measured once, not an option of whichever command
+/// happens to be running.
+func capacitySurvivesStartTests() {
+    test("start carries the measured capacity forward") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(
+            body.contains(
+                "if !options.contains(\"--capacity\"), let known = LaunchAgent.knownCapacityKbps()"),
+            "it reads the plist before rebuilding it")
+        check(
+            body.contains("keeping the measured capacity from the login item"),
+            "and says so, so a stale number is visible")
+    }
+
+    test("--capacity is an option with a value, not an address") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        // Without this the value falls through to the `address == nil` branch and is read as a
+        // device address: `start 40:DC:… --capacity 449` would stream to a headphone called "449".
+        // The comment above the list names both flags, so searching the text proves nothing. The
+        // list itself is the `if [...]` that precedes `.contains(argument)`: take that.
+        guard let contains = body.range(of: ".contains(argument), let value = rest.popFirst()"),
+            let open = body[..<contains.lowerBound].range(of: "if [", options: .backwards)
+        else {
+            check(false, "the list of value-taking options is present")
+            return
+        }
+        let list = String(body[open.upperBound..<contains.lowerBound])
+        check(list.contains("\"--capacity\""), "the list includes --capacity: \(list)")
+        check(list.contains("\"--report-ms\""), "and --report-ms, which had the same hole")
+    }
+
+    test("an explicit --capacity is not overwritten by the remembered one") {
+        // The caller wins: `start ADDR --capacity 300` must mean 300, not the 449 in the plist.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        check(
+            (source ?? "").contains("if !options.contains(\"--capacity\")"),
+            "only when the caller did not say")
+    }
+}
+
+/// The installer must never write through the inode of the file it is replacing.
+///
+/// Measured 2026-11-14: after an install, every run of the installed `codecblue` died with
+/// `Killed: 9` — `version`, `devices`, `status`, `start` — while the identical bytes in
+/// `.build/debug/` and a copy of them in `/tmp` ran fine. `codesign -v` said the signature was
+/// valid and `amfid` logged nothing about that path. `cp` onto an existing file keeps the inode,
+/// the kernel caches the code signature against the inode, and a new cdhash under an old cache
+/// entry is treated as tampering.
+func installInodeTests() {
+    test("the installer replaces files by rename, not by writing through them") {
+        let script = try? String(contentsOfFile: "scripts/install.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("install_file()"), "there is an install_file helper")
+        check(body.contains("mv -f \"$tmp\" \"$to\""), "which renames into place")
+        // The three binaries must go through it. `cp -R` for the bundle is fine: it is removed
+        // first, so it gets a fresh inode anyway.
+        check(
+            !body.contains("cp .build/debug/codecblue \"$APP_DIR/codecblue\""),
+            "the CLI is not copied straight onto the old one")
+        check(
+            !body.contains("cp .build/debug/codecblue-keys \"$APP_DIR/codecblue-keys\""),
+            "nor is the media key helper")
+        check(
+            body.contains("install_file .build/debug/codecblue \"$APP_DIR/codecblue\""),
+            "the CLI goes through install_file")
+        check(
+            body.contains(
+                "install_file .build/debug/codecblue-keys \"$APP_DIR/codecblue-keys\""),
+            "so does the helper")
+    }
+
+    test("a stale inode is what killed the installed binary, not a bad signature") {
+        // The evidence, so that the next person does not repeat the hour: same bytes, valid
+        // signature, and the only difference between the copy that ran and the copy that died was
+        // whether the file had been written in place.
+        let script = try? String(contentsOfFile: "scripts/install.sh", encoding: .utf8)
+        let body = script ?? ""
+        check(body.contains("Killed: 9"), "the symptom is written down where the fix is")
+        check(body.contains("a vnode's code signature against that inode"), "and the reason")
     }
 }

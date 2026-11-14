@@ -77,12 +77,33 @@ mkdir -p "$APP_DIR"
 # The CLI and the media key helper go side by side: `codecblue` looks for `codecblue-keys` next
 # to itself, and the LaunchAgent points at this copy rather than at a build directory that
 # `swift package clean` would delete.
-cp .build/debug/codecblue "$APP_DIR/codecblue"
-cp .build/debug/codecblue-keys "$APP_DIR/codecblue-keys"
+# Copy beside the target and rename over it, never `cp` onto the file itself.
+#
+# Measured 2026-11-14, and it cost an hour: after an install, every run of the installed
+# `codecblue` died with `Killed: 9` — `version`, `devices`, `status`, `start`, all of them — while
+# the identical bytes in `.build/debug/` and even a copy of them in `/tmp` ran fine. `codesign -v`
+# said the signature was valid, and `amfid` logged nothing about the installed path.
+#
+# The cause is that `cp` onto an existing file writes through the same inode, and the kernel caches
+# a vnode's code signature against that inode. The file then holds a new cdhash under an old cache
+# entry, the mismatch is treated as tampering, and the process is killed before `main` runs. A
+# rename gives the file a new inode, so there is nothing stale to disagree with.
+#
+# It also makes the install atomic: the old binary is either fully there or fully replaced, never
+# half-written if the copy is interrupted.
+install_file() {
+    from=$1; to=$2
+    tmp="$to.new.$$"
+    cp "$from" "$tmp" || { echo "error: could not copy $from" >&2; exit 1; }
+    mv -f "$tmp" "$to" || { rm -f "$tmp"; echo "error: could not replace $to" >&2; exit 1; }
+}
+
+install_file .build/debug/codecblue "$APP_DIR/codecblue"
+install_file .build/debug/codecblue-keys "$APP_DIR/codecblue-keys"
 rm -rf "$APP_DIR/CodecBlue.app"
 cp -R "$MENU_APP" "$APP_DIR/CodecBlue.app"
 # The bundle's own copy of the helper is the one it will find; keep both in step.
-cp .build/debug/codecblue-keys "$APP_DIR/CodecBlue.app/Contents/MacOS/codecblue-keys"
+install_file .build/debug/codecblue-keys "$APP_DIR/CodecBlue.app/Contents/MacOS/codecblue-keys"
 # Ad-hoc, with the identifier as the designated requirement: `scripts/sign.sh` explains why that
 # matters — a cdhash requirement would forget the Accessibility permission at the next update.
 sh "$HERE/scripts/sign.sh" "$APP_DIR/CodecBlue.app" com.codecblue.menu 2>/dev/null || true
