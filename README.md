@@ -199,9 +199,14 @@ The delay this program adds is two numbers, and they are two different things:
 Both are adjustable, and both are worth adjusting by ear rather than by argument:
 
 ```sh
-codecblue cushion 40                        # while it plays
-codecblue system ADDR --ring-ms 60          # at start
+codecblue cushion 40        # while it plays
+codecblue ring 60           # while it plays
 ```
+
+Both change the running stream, and that matters more than it sounds: `codecblue start ADDR
+--ring-ms 60` also works, but it *restarts* the stream — it stops it, hands the headphones back to
+macOS and takes them again. Comparing two buffer depths that way compares a takeover and a fresh
+link as well as the buffer. `ring` and `cushion` change the number without touching the audio.
 
 The ring's 100 ms was forced by a real fault — short reads that repeated the last sample, heard
 as crackle, measured on 2026-11-10 as 462 windows out of 8 656 holding 2 980 ms of plateau. That
@@ -258,7 +263,7 @@ Without the app, the stream can also be run by hand:
 | `codecblue quality HQ\|SQ\|LQ\|0-4` | The ceiling, while it plays. A level is a limit, not a resting place |
 | `codecblue adapt on\|off` | Let it choose the level itself |
 | `codecblue cushion 40` | The cushion in ms — half of the latency |
-| `codecblue system ADDR --ring-ms 60` | The ring's depth — the other half |
+| `codecblue ring 60` | The ring's depth — the other half |
 | `codecblue rate 44100\|48000` | The device's sample rate (after a coreaudiod restart) |
 | `codecblue abr` | What this libldac build accepts, measured rather than assumed |
 | `codecblue agent install\|remove\|status` | The LaunchAgent |
