@@ -23,7 +23,7 @@ BIN := .build/debug
 # own resolves frameworks from /System/Library, where a plug-in header does not exist.
 CC := clang -isysroot $(shell xcrun --show-sdk-path)
 
-.PHONY: all build test selftest format lint check coverage menu driver install uninstall release clean distclean help
+.PHONY: all build test selftest format lint check coverage bump-patch bump-minor bump-major menu driver install uninstall release clean distclean help
 
 all: build
 
@@ -34,6 +34,9 @@ help:
 	@echo "make lint       check formatting and compiler warnings without changing anything"
 	@echo "make check      lint, then test — the whole gate, and what CI runs"
 	@echo "make coverage   how much of the engine the self-test actually executes"
+	@echo "make bump-patch tag the next patch version and push it (starts a release)"
+	@echo "make bump-minor tag the next minor version and push it"
+	@echo "make bump-major tag the next major version and push it"
 	@echo "make release    build the release archive (.build/dist/CodecBlue-<version>.zip)"
 	@echo "make menu       assemble CodecBlue.app"
 	@echo "make driver     build the virtual output device (no install)"
@@ -138,6 +141,28 @@ lint:
 
 # The gate: what CI runs, and what to run before pushing.
 check: lint test
+
+# Cutting a release. The version lives in the tag and nowhere else — `scripts/version.sh` reads it
+# from there at build time — so a bump is one act: create the tag and push it, which is what starts
+# `.github/workflows/release.yml`. There is nothing to edit and no commit to make.
+#
+# `scripts/bump.sh` carries the checks, and they are the interesting part: a clean tree, on main,
+# level with origin, a tag that does not exist yet, and a version that goes up. Each is a way a
+# release goes wrong, and each refuses rather than warns.
+#
+# `DRY_RUN=1 make bump-patch` says what it would do. `YES=1` skips the confirmation, for a script
+# that has already asked its own question.
+DRY_RUN_FLAG := $(if $(DRY_RUN),--dry-run,)
+YES_FLAG := $(if $(YES),--yes,)
+
+bump-patch:
+	@sh scripts/bump.sh patch $(DRY_RUN_FLAG) $(YES_FLAG)
+
+bump-minor:
+	@sh scripts/bump.sh minor $(DRY_RUN_FLAG) $(YES_FLAG)
+
+bump-major:
+	@sh scripts/bump.sh major $(DRY_RUN_FLAG) $(YES_FLAG)
 
 # The archive a tag produces, built here so that a release can be checked before it is published.
 # Needs a tag: without one the version is 0.0.0-development and the archive says so, which is the
