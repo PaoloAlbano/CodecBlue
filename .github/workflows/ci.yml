@@ -88,5 +88,9 @@ jobs:
             echo "coverage unchanged at $number"
             exit 0
           fi
-          git commit -m "coverage: $number"
+          # The trailer is on every commit in this repository, and a bot commit is not an
+          # exception: the history should not need a footnote explaining which commits are
+          # co-authored and which are not.
+          git commit -m "coverage: $number" \
+            -m "Co-authored-by: DomynAgents <no-reply@domyn.com>"
           git push origin badges

@@ -4300,3 +4300,18 @@ func persistedRingTests() {
             "a refused value exits before the plist is touched")
     }
 }
+
+/// The co-author trailer is on every commit, and that is a rule worth a test.
+///
+/// Asked 2026-11-14: "check that all the commits have the coauthor, you did not do them all". Two
+/// rounds of rewriting found the same mistake twice — a `filter-branch` range that started one
+/// commit too late — and the second round found that the bot's own commits on the `badges` branch
+/// had none either. A rule that is checked by a person reading `git log` is a rule that holds until
+/// somebody is in a hurry.
+func commitTrailerTests() {
+    test("the coverage bot writes the trailer too") {
+        let workflow = try? String(contentsOfFile: ".github/workflows/ci.yml", encoding: .utf8)
+        let body = workflow ?? ""
+        check(body.contains("Co-authored-by: DomynAgents"), "the bot commit carries it")
+    }
+}
