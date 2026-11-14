@@ -4378,3 +4378,70 @@ func menuRingTests() {
         check(occurrences == 2, "both writers carry it: \(occurrences)")
     }
 }
+
+/// bluetoothd's uptime, which is the missing number in the only bug this project has not solved.
+///
+/// Measured 2026-11-13: after five days of uptime every stream began failing with
+/// `bluetoothd did not answer: check-in / power state` while macOS still showed the headphones
+/// connected and playing. `sudo killall bluetoothd` fixed it instantly. Five days is one data
+/// point, and one point cannot tell "after N days" from "after N takeovers" — so the point of this
+/// code is not to fix anything, it is to make the next occurrence a data point.
+func daemonUptimeTests() {
+    test("ps etime is parsed in all three of its shapes") {
+        // The formats `ps -o etime` produces, and getting one wrong means a wrong number in a
+        // diagnostic, which is worse than no number.
+        let long = DaemonUptime.parse("47968 03-04:19:39")
+        check(long?.pid == 47968, "pid")
+        check(
+            long?.seconds == 3 * 86_400 + 4 * 3_600 + 19 * 60 + 39,
+            "dd-hh:mm:ss: \(long?.seconds ?? -1)")
+        check(long?.humanAge == "3d 4h", "and it reads as 3d 4h: \(long?.humanAge ?? "nil")")
+
+        let hours = DaemonUptime.parse("1234 12:34:56")
+        check(hours?.seconds == 12 * 3_600 + 34 * 60 + 56, "hh:mm:ss")
+        check(hours?.humanAge == "12h 34m", "reads as 12h 34m")
+
+        let seconds = DaemonUptime.parse("99 47:12")
+        check(seconds?.seconds == 47 * 60 + 12, "mm:ss")
+        check(seconds?.humanAge == "47m", "reads as 47m")
+    }
+
+    test("a daemon that cannot be parsed is nil, not zero") {
+        // Zero would read as "just started", which is the opposite of the fact being measured.
+        check(DaemonUptime.parse("") == nil, "empty")
+        check(DaemonUptime.parse("not a pid") == nil, "garbage")
+        check(DaemonUptime.parse("1234") == nil, "pid without etime")
+    }
+
+    test("three days is the threshold, and it is below the one observation") {
+        // Five days is what was seen; the report should catch the approach, not only the event.
+        check(DaemonUptime(seconds: 3 * 86_400, pid: 1).isSuspiciouslyOld, "three days is old")
+        check(!DaemonUptime(seconds: 3 * 86_400 - 1, pid: 1).isSuspiciouslyOld, "one less is not")
+    }
+
+    test("the age is recorded when the check-in fails, and said out loud") {
+        let xpc = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Bluetooth/ClassicXPC.swift", encoding: .utf8)
+        let body = xpc ?? ""
+        check(body.contains("public private(set) var daemonAgeAtFailure"), "the session keeps it")
+        check(body.contains("if daemonAgeAtFailure == nil"), "recorded once, at the first failure")
+
+        let takeover = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Bluetooth/HeadsetTakeover.swift", encoding: .utf8
+        )
+        let t = takeover ?? ""
+        check(t.contains("bluetoothd has been up"), "the message names the uptime")
+        check(t.contains("sudo killall bluetoothd"), "and the fix, with its cost")
+        check(t.contains("This is the daemon's fault"), "and whose fault it is not")
+    }
+
+    test("doctor reports without fixing") {
+        // A killall from inside the stream would drop every other Bluetooth device on the machine
+        // to rescue one, which rule 4 forbids.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("case (\"doctor\", 1):"), "the verb exists")
+        check(body.contains("func doctor() async -> Never"), "and is a report")
+        check(!body.contains("killall\" ]"), "it never runs killall itself")
+    }
+}

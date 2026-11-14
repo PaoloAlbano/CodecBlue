@@ -281,6 +281,7 @@ Without the app, the stream can also be run by hand:
 | `codecblue flood ADDR SECS BYTES` | Measure the link's throughput |
 | `codecblue tone FILE SECS [--sweep]` | Write a test signal: a constant sine, or a sweep |
 | `codecblue devices` | The headphones macOS knows, and whether they are on |
+| `codecblue doctor` | bluetoothd's uptime, whether it answers, and whether a restart would help |
 | `codecblue status` | What a running stream is doing |
 | `codecblue levels` | The whole ladder, and what fits on this link |
 | `codecblue compare` | This link against the Mac's own AAC, in kbps |
@@ -300,6 +301,33 @@ Options for `system` and `play`: `--quality HQ|SQ|LQ|0-4` (the ceiling of the la
 **Test signals matter.** `codecblue tone` writes a constant sine, not a melody: a file whose
 notes change has phase jumps at every change, and a phase jump is exactly what a codec makes
 worse. Testing a link with such a file tests the file. This cost a day.
+
+## When it stops working
+
+Run `codecblue doctor` first. It answers the question that otherwise takes an hour — *is this
+CodecBlue, the headphones, or macOS?* — from three facts: how long `bluetoothd` has been up,
+whether it answers the check-in at all, and whether the headphones are where macOS thinks they are.
+
+```
+bluetoothd   up 3d 4h  (pid 47968)
+check-in     answers
+headphones   2 paired, 0 connected
+stream       not running
+```
+
+**`bluetoothd did not answer: check-in / power state`** is the one failure that is not ours.
+Measured 2026-11-13: after five days of uptime, every stream began failing this way while macOS
+still showed the headphones connected and playing. The fix is one command:
+
+```sh
+sudo killall bluetoothd
+```
+
+It comes back in about a second and every Bluetooth device reconnects. If `doctor` says the daemon
+has been up for days, that is almost certainly what you are looking at. The uptime is the number
+worth reporting in an issue: five days is one data point, and one point cannot tell "after N days"
+from "after N takeovers". CodecBlue will not run that `killall` itself — it would drop every other
+Bluetooth device on the machine to rescue one.
 
 ## Repository layout
 

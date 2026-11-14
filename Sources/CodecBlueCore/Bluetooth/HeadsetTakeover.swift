@@ -137,7 +137,28 @@ public final class HeadsetTakeover: @unchecked Sendable {
     private func startSessions() async throws {
         guard sessions.isEmpty else { return }
         let sessions = (0..<timing.raceSessions).map { ClassicXPCSession(label: "race\($0)") }
-        for session in sessions { try await session.start() }
+        for session in sessions {
+            do {
+                try await session.start()
+            } catch {
+                // The one failure worth explaining, because it is the one that looks like a bug in
+                // this program and is not.
+                //
+                // Measured 2026-11-13: after five days of uptime, every stream began failing at the
+                // check-in while macOS still showed the headphones connected and playing, and
+                // `sudo killall bluetoothd` fixed it instantly. The daemon, not the headphones and
+                // not us. A message that does not say how old the daemon was leaves the reader to
+                // guess, and the guess — "CodecBlue is broken" — is the wrong one.
+                if let age = session.daemonAgeAtFailure, age.isSuspiciouslyOld {
+                    log(
+                        "bluetoothd has been up \(age.humanAge) (pid \(age.pid)) and has stopped "
+                            + "answering. This is the daemon's fault, not the headphones': "
+                            + "`sudo killall bluetoothd` fixes it and costs one second of Bluetooth. "
+                            + "Please report it — the uptime above is the number that is missing.")
+                }
+                throw error
+            }
+        }
         self.sessions = sessions
         device = try? await sessions[0].lookup(address: address).uuid
     }

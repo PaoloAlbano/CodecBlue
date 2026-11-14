@@ -129,6 +129,8 @@ func usage() -> Never {
                                     (plays the CodecBlue virtual device)
                    codecblue rate    44100|48000|88200|96000  (the virtual device's rate)
                    codecblue devices                      (the headphones macOS knows about)
+                   codecblue doctor                       (bluetoothd's health, and whether a
+                                                           restart would fix what you are seeing)
                    codecblue status                       (ask a running stream what it is doing)
                    codecblue quality HQ|SQ|LQ|0-4         (the ceiling, while it plays)
                    codecblue adapt   on|off               (let it choose the level itself)
@@ -151,6 +153,76 @@ func usage() -> Never {
 
             """.utf8))
     exit(2)
+}
+
+/// Reports the state of the pieces this program does not own.
+///
+/// The question it answers is the one that took an hour on 2026-11-13: "is this CodecBlue, the
+/// headphones, or macOS?" — and the answer is almost always visible from three facts: how long
+/// bluetoothd has been up, whether it answers at all, and whether the headphones are where macOS
+/// thinks they are.
+///
+/// It does not fix anything. A `killall bluetoothd` run from here would drop every other Bluetooth
+/// device on the machine to rescue one, and rule 4 says never break the user's Bluetooth. It prints
+/// the command instead, and says what it costs.
+func doctor() async -> Never {
+    var verdicts: [String] = []
+
+    if let age = DaemonUptime.current() {
+        print("bluetoothd   up \(age.humanAge)  (pid \(age.pid))")
+        if age.isSuspiciouslyOld {
+            verdicts.append(
+                "bluetoothd has been up \(age.humanAge). Measured 2026-11-13: at five days it "
+                    + "stopped answering the check-in while macOS still showed the headphones "
+                    + "connected. If streams are failing with `bluetoothd did not answer`, this is "
+                    + "the likely cause.")
+        }
+    } else {
+        print("bluetoothd   not running")
+        verdicts.append("bluetoothd is not running, so nothing Bluetooth can work.")
+    }
+
+    // Whether it answers, which is the fact the uptime only suggests.
+    let session = ClassicXPCSession(label: "doctor")
+    var answered = true
+    do { try await session.start() } catch { answered = false }
+    session.invalidate()
+    print("check-in     \(answered ? "answers" : "does NOT answer")")
+    if !answered {
+        verdicts.append(
+            "bluetoothd does not answer the check-in. `sudo killall bluetoothd` restarts it: it "
+                + "comes back in about a second, every Bluetooth device reconnects, and this is "
+                + "the fix for the 2026-11-13 hang. It is not a fix for anything else.")
+    }
+
+    let devices = BluetoothHeadphone.audioDevices()
+    let connected = devices.filter(\.isConnected)
+    print(
+        "headphones   \(devices.count) paired, \(connected.count) connected"
+            + (connected.isEmpty ? "" : ": " + connected.map(\.name).joined(separator: ", ")))
+
+    if let lines = ControlClient.send("status") {
+        let values = lines.reduce(into: [String: String]()) { result, line in
+            let parts = line.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 { result[String(parts[0])] = String(parts[1]) }
+        }
+        let quality = values["quality"] ?? "unknown"
+        let skips = values["skips"] ?? "?"
+        print("stream       \(quality), \(skips) skipped")
+        if quality == "unknown" {
+            verdicts.append("A stream is running but not streaming: check the headphones are on.")
+        }
+    } else {
+        print("stream       not running")
+    }
+
+    print("")
+    if verdicts.isEmpty {
+        print("nothing looks wrong from here.")
+    } else {
+        for verdict in verdicts { print("· " + verdict) }
+    }
+    exit(0)
 }
 
 func lookup(_ address: String) async throws {
@@ -1837,6 +1909,15 @@ do {
                 }
             }
         }
+    case ("doctor", 1):
+        // The state of the machine, for the failures that are not ours.
+        //
+        // Written because of the 2026-11-13 hang: five days of bluetoothd uptime, every stream
+        // failing at the check-in, macOS still showing the headphones connected, and no way to
+        // tell from the outside whether the fault was the daemon, the headphones or this program.
+        // The answer was `sudo killall bluetoothd`, which took a person an hour to find. This
+        // command is the ten seconds that would have replaced the hour.
+        await doctor()
     case ("devices", 1):
         // What the menu bar app lists. Also useful on its own: it is the only place that shows
         // which of the paired headphones are actually on.

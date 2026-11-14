@@ -157,6 +157,13 @@ public final class ClassicXPCSession: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
+    /// How old bluetoothd was when the last check-in failed, if it failed.
+    ///
+    /// Kept on the session so a caller can put it in its own message: the diagnosis of the
+    /// 2026-11-13 hang is "the daemon had been up five days", and a report that does not say how
+    /// old it was is a report that cannot be added to the next one.
+    public private(set) var daemonAgeAtFailure: DaemonUptime?
+
     /// Connects and checks in the way IOBluetooth does; returns once Bluetooth is on.
     ///
     /// The check-in is retried, and the retry is the whole point.
@@ -179,6 +186,9 @@ public final class ClassicXPCSession: @unchecked Sendable {
                 return
             } catch {
                 lastError = error
+                // Recorded once, at the first failure: the age is a fact about the daemon, and it
+                // does not change between attempts within the same second.
+                if daemonAgeAtFailure == nil { daemonAgeAtFailure = DaemonUptime.current() }
                 // A silent radio is worth asking again; a radio that said "off" is not.
                 let off = onQueue { powerOff }
                 invalidate()
