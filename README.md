@@ -214,6 +214,12 @@ fault is fixed, so the number is now a trade rather than a requirement: lower it
 crackles, then go back one step. `codecblue status` reports `latency_ms`, which is the sum, so the
 comparison is not a guess.
 
+**Measured by ear on 2026-11-14**, FreeBuds 5 on a 449 kbps link: 100 → 143 ms, 60 → 121, 50 →
+~110, 40 → 98, 30 → ~90, 20 → **81 ms**. A small jump was heard once at 40; 20 then played clean
+for a minute with 0 short reads and 0 skips. So the default here is still 100 — the safe number for
+a link nobody has listened to — and 20 is what this link turned out to carry. `codecblue ring 20`
+remembers it.
+
 ## Using it
 
 Open **CodecBlue** from `~/Applications/CodecBlue/` (or run `open ~/Applications/CodecBlue/CodecBlue.app`).
