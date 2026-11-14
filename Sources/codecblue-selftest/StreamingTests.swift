@@ -4262,3 +4262,41 @@ func liveRingTests() {
         check(body.contains("ok ring="), "so does the ring")
     }
 }
+
+/// A depth found by ear has to survive the next restart, or it is not a setting.
+///
+/// Measured 2026-11-14, by the listener: `ring 60`, `50`, `40`, `30`, `20` — all accepted, a small
+/// jump at 40, and 20 played clean for a minute with 0 short reads and `latency_ms 81`. That number
+/// is the result of an experiment; losing it to the next crash would mean running the experiment
+/// again.
+func persistedRingTests() {
+    test("the ring verb writes the chosen depth into the login item") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("options += [\"--ring-ms\", arguments[1]]"), "it is written")
+        check(body.contains("remembered: --ring-ms"), "and said out loud")
+        // Without reloading: the running stream already has the value, and reloading would
+        // interrupt the audio — which is the whole reason this verb exists.
+        check(!body.contains("LaunchAgent.load()\n                print(\"remembered"), "no reload")
+    }
+
+    test("the address comes from the plist, where it is not a flag") {
+        // `plist()` writes [executable, "system", address] and the options after it. A `--address`
+        // does not exist, so looking for one would silently never persist anything.
+        let agent = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift", encoding: .utf8)
+        let body = agent ?? ""
+        check(body.contains("public static func knownAddress() -> String?"), "the reader exists")
+        check(body.contains("<string>system</string>"), "it looks after the verb")
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        check((source ?? "").contains("LaunchAgent.knownAddress()"), "and the verb uses it")
+    }
+
+    test("an error from the stream is not written into the plist") {
+        // `ring 5` is refused by the stream (20…500), and a refusal must not become a setting.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        check(
+            (source ?? "").contains("lines.contains(where: { $0.hasPrefix(\"error\") })"),
+            "a refused value exits before the plist is touched")
+    }
+}

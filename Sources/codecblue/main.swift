@@ -1962,6 +1962,38 @@ do {
             exit(1)
         }
         print(lines.joined(separator: "\n"))
+        // Remembered in the plist, without reloading it.
+        //
+        // The running stream has already been told, so reloading would interrupt the audio to say
+        // the same thing twice — and interrupting the audio is exactly what this verb exists to
+        // avoid. But a depth that evaporates at the next restart is a measurement that cannot be
+        // kept: the listener finds the number they chose by ear, and the next crash puts it back
+        // to 100 with nothing saying so.
+        guard !lines.contains(where: { $0.hasPrefix("error") }) else { exit(1) }
+        // The address is the third argument of the plist, not a flag: `plist()` writes
+        // `[executable, "system", address]` and then the options. So it is read from there rather
+        // than from a `--address` that does not exist.
+        if let address = LaunchAgent.knownAddress() {
+            var options: [String] = []
+            if let quality = LaunchAgent.knownArgument("--quality") {
+                options += ["--quality", quality]
+            }
+            if let cushion = LaunchAgent.knownArgument("--queue-ms") {
+                options += ["--queue-ms", cushion]
+            }
+            if let capacity = LaunchAgent.knownArgument("--capacity") {
+                options += ["--capacity", capacity]
+            }
+            options += ["--ring-ms", arguments[1]]
+            do {
+                try LaunchAgent.install(address: address, arguments: options)
+                print("remembered: --ring-ms \(arguments[1]) in the login item")
+            } catch {
+                print(
+                    "note: the stream changed but the login item did not: \(error.localizedDescription)"
+                )
+            }
+        }
     case ("cushion", 2):
         guard let lines = ControlClient.send("cushion \(arguments[1])") else {
             print("no stream is running (nothing at \(ControlServer.defaultPath))")

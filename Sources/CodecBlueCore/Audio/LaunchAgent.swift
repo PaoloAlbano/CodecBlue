@@ -205,6 +205,22 @@ public enum LaunchAgent {
         return String(rest[open.upperBound..<close.lowerBound])
     }
 
+    /// The device address written into the plist, or nil.
+    ///
+    /// It is not a flag: `plist()` writes `[executable, "system", address]` and the options after
+    /// it. Read back so that a setting changed while the stream plays can be written into the login
+    /// item without asking the caller to remember which headphones are in it.
+    public static func knownAddress() -> String? {
+        guard let text = try? String(contentsOf: plistURL, encoding: .utf8),
+            let system = text.range(of: "<string>system</string>")
+        else { return nil }
+        let rest = text[system.upperBound...]
+        guard let open = rest.range(of: "<string>"),
+            let close = rest.range(of: "</string>", range: open.upperBound..<rest.endIndex)
+        else { return nil }
+        return String(rest[open.upperBound..<close.lowerBound])
+    }
+
     /// Whether the plist is on disk, which is what decides whether the next login starts us.
     public static func isInstalled() -> Bool {
         FileManager.default.fileExists(atPath: plistURL.path)
