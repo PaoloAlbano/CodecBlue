@@ -286,6 +286,10 @@ public final class A2DPStreamer: @unchecked Sendable {
             // answer before the first note instead of after the first crackle.
             if knownCapacityKbps > 0, currentCarriedKbps <= 0 {
                 currentCarriedKbps = knownCapacityKbps
+                // No age: this one was measured at rest by `codecblue flood`, not by a window of
+                // this stream, so it is a starting assumption rather than a measurement of the
+                // link as it is now. Callers that care about the difference ask `ceilingAge`.
+                ceilingAge = nil
             }
         }
     }
@@ -301,6 +305,17 @@ public final class A2DPStreamer: @unchecked Sendable {
     /// What it is good for: it is the honest answer to "has this link ever carried 990?". If the
     /// floor is 336, HQ has never once been carried, and saying so is better than silence.
     public private(set) var currentFloorKbps = 0.0
+
+    /// When `currentCarriedKbps` was last measured, in seconds since the stream started, or nil if
+    /// it has never been measured.
+    ///
+    /// The ceiling is a *measurement*, and a measurement has a date. Without one it behaves like a
+    /// verdict: it is written on the single window that dropped audio and never raised, so one
+    /// unlucky window at start-up outlived everything that made it true. Reported 2026-11-15 —
+    /// `link_ceiling 215` and `link_floor 310` printed together, seventeen minutes after the window
+    /// that produced the 215, while the link was carrying 461 without losing a frame. The ceiling
+    /// was a memory of a bad moment being presented as a limit.
+    public private(set) var ceilingAge: TimeInterval?
 
     /// The headphones' battery, as last reported, or nil if they have not said.
     public private(set) var batteryPercent: Int?
@@ -1049,13 +1064,43 @@ public final class A2DPStreamer: @unchecked Sendable {
                 currentBurst = burst
                 currentStalls = stallCount
                 currentOccupancy = occupancy
-                if carriedKbps > 0 { currentFloorKbps = max(currentFloorKbps, carriedKbps) }
+                if carriedKbps > 0 {
+                    currentFloorKbps = max(currentFloorKbps, carriedKbps)
+                    // The ceiling expires when the floor passes it.
+                    //
+                    // The two numbers answer the same question — how much does this link carry — and
+                    // the floor is the one that improves without a probe: it is measured on every
+                    // clean window, at whatever level is playing. A ceiling that a *clean* window
+                    // has already beaten is not a limit any more, it is a record of a bad moment,
+                    // and keeping it made `status` contradict itself for seventeen minutes.
+                    //
+                    // The floor is the right thing to compare against and the playing bitrate is
+                    // not: a stream settled at LQ carries 303 while the link demonstrably carries
+                    // 461, and expiring on 303 would throw away the ceiling on a link that is
+                    // merely playing something small.
+                    //
+                    // This only ever *removes* a ceiling. It cannot raise one, so the settle rule
+                    // above is untouched: nothing here can make the stream climb into a level that
+                    // has not been measured to fit.
+                    if currentCarriedKbps > 0, currentFloorKbps > currentCarriedKbps {
+                        log(
+                            String(
+                                format:
+                                    "ceiling: %.0f kbps was measured %.0f s ago, the link has since carried %.0f: forgetting it",
+                                currentCarriedKbps, ceilingAge ?? 0, currentFloorKbps))
+                        currentCarriedKbps = 0
+                        ceilingAge = nil
+                    }
+                }
                 // Only a window that *lost audio* measures the ceiling; see `currentCarriedKbps`.
                 //
                 // A refusal the queue absorbed is not evidence about the link: the cushion exists
                 // precisely to absorb those, and treating them as the ceiling made MQ — playing
                 // cleanly at 334 kbps — look "too much for this link (334)". Measured 2026-11-08.
-                if dropped > 0.02 { currentCarriedKbps = carriedKbps }
+                if dropped > 0.02 {
+                    currentCarriedKbps = carriedKbps
+                    ceilingAge = Double(now - streamAnchor) / 1e9
+                }
                 if let requested = requestedRung {
                     requestedRung = nil
                     adapter.ceilingRung = requested

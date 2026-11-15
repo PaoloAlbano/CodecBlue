@@ -4771,3 +4771,87 @@ func statusCeilingTests() {
         check(body.contains("ceiling >= witness"), "and its test")
     }
 }
+
+/// A ceiling is a measurement, and a measurement has a date.
+///
+/// The ceiling is written on the one window that dropped audio and never raised, so a single
+/// unlucky window at start-up outlived everything that made it true. Reported 2026-11-15:
+/// `link_ceiling 215` beside `link_floor 310`, seventeen minutes later, while the link carried 461
+/// with no drops. The floor is the number that improves without a probe — it is measured on every
+/// clean window — so a ceiling a clean window has already beaten is not a limit any more.
+///
+/// The rule only ever removes a ceiling and can never raise one, which is what keeps it clear of
+/// the settle rule: nothing here can make the stream climb into a level that has not been measured
+/// to fit.
+func ceilingExpiryTests() {
+    /// The rule, in the same shape as the stream's: forget the ceiling when the floor passes it.
+    func afterCleanWindow(
+        ceiling: Double, floor: Double, carried: Double
+    ) -> (ceiling: Double, floor: Double) {
+        var c = ceiling
+        var f = floor
+        if carried > 0 {
+            f = max(f, carried)
+            if c > 0, f > c { c = 0 }
+        }
+        return (c, f)
+    }
+
+    test("a clean window that beats the ceiling forgets it") {
+        // The numbers from the report: 215 measured, then the link carried 461.
+        let now = afterCleanWindow(ceiling: 215, floor: 310, carried: 461)
+        check(now.ceiling == 0, "the stale ceiling is gone")
+        check(now.floor == 461, "and the floor is what the link really carried")
+    }
+
+    test("a ceiling the floor has not reached is kept") {
+        // HQ on a link measured at 449: the ceiling still bounds it, and forgetting it would let
+        // the stream climb back into a level that was measured not to fit.
+        let now = afterCleanWindow(ceiling: 449, floor: 310, carried: 310)
+        check(now.ceiling == 449, "kept: the floor has not passed it")
+        check(now.floor == 310, "floor unchanged")
+    }
+
+    test("the ceiling is compared with the floor, not with what is playing") {
+        // A stream settled at LQ carries 303 while the link demonstrably carries 461. Expiring on
+        // the playing bitrate would throw away a ceiling on a link that is merely playing something
+        // small — and 303 < 449, so a 449 ceiling would be lost for no reason.
+        let now = afterCleanWindow(ceiling: 449, floor: 461, carried: 461)
+        check(now.ceiling == 0, "the floor passed it, so it goes")
+        // And the case that must not fire: floor below the ceiling, playing far below both.
+        let kept = afterCleanWindow(ceiling: 449, floor: 310, carried: 310)
+        check(kept.ceiling == 449, "playing at 303 does not expire a 449 ceiling")
+    }
+
+    test("a window with nothing sent decides nothing") {
+        // Silence is not evidence: no audio means no measurement, and the ceiling must survive it.
+        let now = afterCleanWindow(ceiling: 215, floor: 310, carried: 0)
+        check(now.ceiling == 215, "kept while nothing is sent")
+        check(now.floor == 310, "and the floor does not move either")
+    }
+
+    test("expiry can only remove a ceiling, never raise one") {
+        let now = afterCleanWindow(ceiling: 215, floor: 461, carried: 461)
+        check(now.ceiling == 0, "removed, not raised to 461")
+        check(now.ceiling <= 215, "the number never grows")
+    }
+
+    test("the stream records when the ceiling was measured") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("public private(set) var ceilingAge: TimeInterval?"), "the age is kept")
+        check(
+            body.contains("ceilingAge = Double(now - streamAnchor) / 1e9"), "stamped at measurement"
+        )
+        check(body.contains("ceilingAge = nil"), "and cleared with the ceiling")
+        check(body.contains("forgetting it"), "the log says what happened")
+    }
+
+    test("status prints the age, and a dash when there is none") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("out[\"ceiling_age\"]"), "the key exists")
+        check(body.contains("streamer.ceilingAge ?? 0"), "read from the stream")
+    }
+}

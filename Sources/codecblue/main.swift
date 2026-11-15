@@ -1106,6 +1106,15 @@ func playSystemSession(
             streamer.currentCarriedKbps > 0
                 ? streamer.currentCarriedKbps : streamer.currentFloorKbps)
         out["link_ceiling"] = String(format: "%.0f", streamer.currentCarriedKbps)
+        // How old the ceiling is, because a measurement without a date reads as a verdict.
+        //
+        // Reported 2026-11-15: `link_ceiling 215` beside `link_floor 310`, seventeen minutes after
+        // the one window that produced it, while the link carried 461 with no drops. The stream now
+        // forgets a ceiling the floor has passed, so this should read `-` on a healthy link; when it
+        // does not, the age is what tells the reader whether to believe it.
+        out["ceiling_age"] =
+            streamer.currentCarriedKbps > 0
+            ? String(format: "%.0f", streamer.ceilingAge ?? 0) : "-"
         out["link_floor"] = String(format: "%.0f", streamer.currentFloorKbps)
         out["link_occupancy"] = String(format: "%.0f", streamer.currentOccupancy * 100)
         // The burst only means something when the socket refused something: with no refusal it is
