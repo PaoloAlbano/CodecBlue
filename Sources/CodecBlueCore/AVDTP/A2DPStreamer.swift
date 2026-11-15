@@ -62,6 +62,11 @@ public final class A2DPStreamer: @unchecked Sendable {
     public var handsFree: HandsFreeHolder?
 
     /// How much audio may wait for the socket before the oldest is dropped.
+    ///
+    /// 150 ms is the default for `play`, which reads a file and can afford to wait. The agent
+    /// (`codecblue system`) sets 60, because a live stream cannot: every millisecond here is a
+    /// millisecond of delay the listener hears. Two defaults on purpose, and the reason they differ
+    /// is worth knowing before changing either — the menu's "60 ms — default" is the agent's.
     public var queueDuration: TimeInterval = 0.15
     /// The queue grows to this when the link stalls, and comes back down when it does not. The
     /// gap between the two is the whole point: low delay when the link is good, protection when

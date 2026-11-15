@@ -703,9 +703,16 @@ func playSystemSession(
     var rung = 4
     var keepLinkQuality = true
     var adapt = true
-    // The cushion is learned, not chosen: PacketQueue.noteStall/relax start it at 80 ms — where a
-    // good link stays — and widen it only if a stall proves it needs the room. A fixed 250 ms was
-    // the worst case paid all the time; this pays it only when the link asks.
+    // The cushion is learned, not chosen: it starts at the floor below and `PacketQueue.noteStall`
+    // widens it only when a stall proves it needs the room. A fixed 250 ms was the worst case paid
+    // all the time; this pays it only when the link asks.
+    //
+    // 60 ms, and the number was wrong in the comment above it for weeks: it said 80, which is what
+    // the code used before the floor was lowered on 2026-11-10 and the comment was not moved with
+    // it. Three numbers were in circulation — 80 in the comment, 150 in `A2DPStreamer.queueDuration`
+    // (the default for `play`, which reads a file and can afford to wait), 60 here — and the menu
+    // labelled 60 "default" without saying default *for what*. Measured 2026-11-14, reading the
+    // code to answer a question about latency and getting three different answers.
     var queueDuration = 0.06
     // The socket buffer is one MTU by default, so a packet waits for bluetoothd to drain it
     // before the next can be handed over. Measured stalls of 100-300 ms mean bluetoothd goes

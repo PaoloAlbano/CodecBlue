@@ -167,7 +167,11 @@ struct ContentView: View {
             // nothing left to gain.
             ForEach(
                 [
-                    (30, "30 ms — tightest"), (60, "60 ms — default"),
+                    // "start" rather than "default": 60 is where the agent begins, not where it
+                    // stays. The queue widens itself when the link stalls, so a stream that reads
+                    // "cushion 60" here can be holding 120 a minute later — and a label that says
+                    // "default" invites the reader to think the number is the delay.
+                    (30, "30 ms — tightest"), (60, "60 ms — where it starts"),
                     (100, "100 ms — safer"), (150, "150 ms — steadiest"),
                 ], id: \.0
             ) { pair in

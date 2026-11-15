@@ -4677,3 +4677,40 @@ func logVolumeTests() {
         check(body.contains("reachable again after"), "and the recovery is said too")
     }
 }
+
+/// Three numbers were in circulation for the same thing, and two of them were wrong.
+///
+/// Measured 2026-11-14, reading the code to answer a question about latency: `main.swift` said 80 ms
+/// in a comment above a value of 60; `A2DPStreamer.queueDuration` said 150; and the menu labelled
+/// 60 "default" without saying default *for what*. The 80 was what the floor had been before it was
+/// lowered on 2026-11-10, and the comment was never moved with it.
+func cushionLabelTests() {
+    test("the comment matches the value it describes") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        // The stale sentence, gone.
+        check(!body.contains("noteStall/relax start it at 80 ms"), "the 80 ms comment is gone")
+        check(body.contains("var queueDuration = 0.06"), "and the value is still 60")
+        check(
+            body.contains("60 ms, and the number was wrong in the comment"),
+            "the history is written down")
+    }
+
+    test("the two defaults are documented as two, not as a contradiction") {
+        let streamer = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = streamer ?? ""
+        check(body.contains("public var queueDuration: TimeInterval = 0.15"), "play keeps 150")
+        check(body.contains("The agent"), "and the difference is explained")
+    }
+
+    test("the menu does not call a starting point a default") {
+        // The queue widens itself, so 60 is where a stream begins and not what it holds a minute
+        // later. "default" invites the reader to think the number is the delay.
+        let menu = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/CodecBlueMenuApp.swift", encoding: .utf8)
+        let body = menu ?? ""
+        check(!body.contains("\"60 ms — default\""), "the misleading label is gone")
+        check(body.contains("60 ms — where it starts"), "replaced by an accurate one")
+    }
+}

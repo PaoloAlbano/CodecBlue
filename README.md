@@ -195,7 +195,7 @@ The delay this program adds is two numbers, and they are two different things:
 
 | | Default | What it is |
 |---|---|---|
-| **cushion** | 60 ms, learned | audio encoded and waiting for the link. It widens itself when the link stalls, because a cushion that cannot grow is a cushion that clicks |
+| **cushion** | 60 ms, learned | audio encoded and waiting for the link. It starts at 60 and widens itself when the link stalls, because a cushion that cannot grow is a cushion that clicks — so the number you set is where it begins, not where it stays |
 | **ring** | 100 ms | audio the driver has written and the encoder has not read yet. It is a jitter buffer for the writer, not for the link |
 
 Both are adjustable, and both are worth adjusting by ear rather than by argument:
