@@ -4714,3 +4714,60 @@ func cushionLabelTests() {
         check(body.contains("60 ms — where it starts"), "replaced by an accurate one")
     }
 }
+
+/// `status` and the menu must not answer the same question two different ways.
+///
+/// Reported 2026-11-15: `link_ceiling 215`, `link_floor 310`, `quality_kbps 303`. A ceiling below
+/// the floor is self-contradictory — the floor is the most the link has ever been measured to
+/// carry, so nothing can credibly bound a link beneath it. The menu has discarded that case since
+/// 2026-11-11 (`AppModel.refresh`), so the menu said 310 while `status` printed 215 and the person
+/// reading both saw two answers to one question.
+///
+/// The cause is that `currentCarriedKbps` only ever moves down: it is written on a window that
+/// dropped audio and never raised, so one unlucky window at start-up outlives the condition that
+/// produced it. Fixing that is a change to the settle rule and needs a listening test; discarding
+/// the contradiction is a change to a printout.
+func statusCeilingTests() {
+    /// The rule, copied from `AppModel.refresh` so both can be checked against the same arithmetic.
+    func credible(ceiling: Double, floor: Double, playing: Double) -> Bool {
+        let witness = max(playing, floor)
+        return ceiling > 0 && (witness <= 0 || ceiling >= witness)
+    }
+
+    test("a ceiling below the floor is not credible") {
+        // The exact numbers from the report.
+        check(!credible(ceiling: 215, floor: 310, playing: 303), "215 under 310")
+        check(!credible(ceiling: 331, floor: 461, playing: 303), "331 under 461")
+        // And the cases that are fine.
+        check(credible(ceiling: 449, floor: 310, playing: 303), "449 over both")
+        check(credible(ceiling: 310, floor: 310, playing: 0), "equal to the floor is credible")
+        check(credible(ceiling: 303, floor: 0, playing: 303), "equal to what plays is credible")
+    }
+
+    test("status applies the rule and says why") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("let ceilingIsCredible = ceiling > 0"), "the rule is applied")
+        check(body.contains("below the floor of"), "and the ceiling says so")
+        check(body.contains("not a limit, see link_floor"), "pointing at the number that is")
+        check(body.contains("the ceiling is not credible"), "and link_kbps explains itself")
+    }
+
+    test("the measurement is kept, not hidden") {
+        // It is a real measurement of a real window; throwing it away would be its own small lie.
+        // What it is not is a limit, and that is what the parenthetical says.
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("Kept rather than hidden"), "the reason is written down")
+        check(!body.contains("if parts[0] == \"link_ceiling\" { continue }"), "it is not dropped")
+    }
+
+    test("status and the menu use the same arithmetic") {
+        // Both take `max(playing, floor)` as the witness and require the ceiling to reach it.
+        let model = try? String(
+            contentsOfFile: "Sources/CodecBlueMenu/AppModel.swift", encoding: .utf8)
+        let body = model ?? ""
+        check(body.contains("let witness = max(playing, floor)"), "the menu's witness")
+        check(body.contains("ceiling >= witness"), "and its test")
+    }
+}

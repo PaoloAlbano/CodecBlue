@@ -2009,12 +2009,46 @@ do {
                 "unknown (nothing sent yet: the link is not exercised until audio flows)",
             "quality_kbps": "unknown (nothing sent yet)",
         ]
+        // The ceiling is discarded when it contradicts the floor, here as well as in the menu.
+        //
+        // Reported 2026-11-15: `link_ceiling 215`, `link_floor 310`, `quality_kbps 303` — a ceiling
+        // below a floor is self-contradictory, because the floor is the most the link has ever been
+        // measured to carry and nothing can credibly bound a link beneath it. The menu has had this
+        // rule since 2026-11-11 (`AppModel.refresh`), so the menu said 310 while `status` printed
+        // 215, and the person reading both saw two answers to one question.
+        //
+        // The cause of a stale ceiling is that `currentCarriedKbps` only ever moves down: it is
+        // written on a window that dropped audio and never raised, so one unlucky window at start-up
+        // outlives the condition that produced it. Fixing that is a change to the settle rule and
+        // needs a listening test; discarding the contradiction is a change to a printout.
+        var values: [String: String] = [:]
+        for line in lines where line != "end" {
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2 { values[parts[0]] = parts[1] }
+        }
+        let ceiling = Double(values["link_ceiling"] ?? "") ?? 0
+        let floor = Double(values["link_floor"] ?? "") ?? 0
+        let playing = Double(values["quality_kbps"] ?? "") ?? 0
+        let witness = max(playing, floor)
+        let ceilingIsCredible = ceiling > 0 && (witness <= 0 || ceiling >= witness)
+
         for line in lines where line != "end" {
             let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
             if parts.count == 2 {
-                let shown =
+                var shown =
                     explanations[parts[0]].flatMap { parts[1] == "unknown" ? $0 : nil }
                     ?? parts[1]
+                if parts[0] == "link_ceiling", !ceilingIsCredible, ceiling > 0 {
+                    // Kept rather than hidden: it is a real measurement of a real window, and
+                    // throwing it away would be its own small lie. What it is not is a limit.
+                    shown = String(
+                        format: "%.0f (below the floor of %.0f: not a limit, see link_floor)",
+                        ceiling, floor)
+                }
+                if parts[0] == "link_kbps", !ceilingIsCredible, ceiling > 0 {
+                    shown = String(
+                        format: "%.0f (the floor: the ceiling is not credible)", floor)
+                }
                 print("\(parts[0].padding(toLength: 14, withPad: " ", startingAt: 0)) \(shown)")
             } else {
                 print(line)
