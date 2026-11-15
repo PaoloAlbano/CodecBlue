@@ -270,6 +270,11 @@ public enum LaunchAgent {
     /// plist for a different pair of headphones, loading alone would keep the old address running.
     public static func load() throws {
         run("/bin/launchctl", ["unload", plistURL.path])
+        // Between the unload and the load, which is the only moment with no writer: the process
+        // holds the log open by path through launchd, so renaming it while a stream runs would send
+        // that stream's writes to a file with no name. Measured 2026-11-14: 10 MB in 15 hours,
+        // 16 MB a day, nothing rotating it.
+        AgentLog.rotateIfNeeded()
         let status = run("/bin/launchctl", ["load", plistURL.path])
         guard status == 0 else {
             throw LaunchAgentError.launchctlFailed(status)

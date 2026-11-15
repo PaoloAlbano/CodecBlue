@@ -1567,11 +1567,22 @@ func playSystem(_ address: String, options: [String]) async throws {
     // waiting: the backoff grows to a minute, the log says what it is waiting for once per attempt
     // instead of once per second, and the process stays alive so launchd has nothing to restart.
     var backoff: TimeInterval = 5
+    // How many times the headphones have been unreachable in a row, and when that was last said.
+    // The count is what makes the log readable: one line at the start, one every ten minutes, and
+    // the number tells the reader it kept trying.
+    var unreachableAttempts = 0
+    var lastUnreachableLog = Date.distantPast
     while true {
         let interruptedByCall: Bool
         do {
             interruptedByCall = try await playSystemOnce(
                 address, options: options, monitor: monitor, stopRequest: stopRequest)
+            // Back in business: the next silence starts its own count, and the log says the wait
+            // ended — otherwise a reader sees "not reachable" and never learns it recovered.
+            if unreachableAttempts > 0 {
+                log("the headphones are reachable again after \(unreachableAttempts) attempt(s)")
+                unreachableAttempts = 0
+            }
         } catch ClassicXPCError.timeout(let what) {
             // "Not reachable" is a claim about the headphones, and it was being made about the
             // wrong thing.
@@ -1594,11 +1605,26 @@ func playSystem(_ address: String, options: [String]) async throws {
             backoff = min(backoff * 2, 60)
             continue
         } catch TakeoverError.headphonesDidNotConnect {
-            log(
-                String(
-                    format: "the headphones are not reachable; retrying in %.0f s "
-                        + "(they are off, out of range, or in their case)",
-                    backoff))
+            // Said once, then once every ten minutes with a count.
+            //
+            // Measured 2026-11-14: 1 194 identical lines in one log, because the headphones sat in
+            // their case overnight and the retry runs every five seconds up to a minute. Those
+            // lines were the majority of the log whenever nobody was listening — a log that
+            // repeats itself is a log nobody reads, and the one line that would matter is buried
+            // in it.
+            unreachableAttempts += 1
+            let now = Date()
+            if unreachableAttempts == 1 || now.timeIntervalSince(lastUnreachableLog) >= 600 {
+                lastUnreachableLog = now
+                let suffix =
+                    unreachableAttempts > 1
+                    ? " (\(unreachableAttempts) attempts so far)" : ""
+                log(
+                    String(
+                        format: "the headphones are not reachable; retrying in %.0f s "
+                            + "(they are off, out of range, or in their case)%@",
+                        backoff, suffix))
+            }
             // A sleep that ignores the stop request is a process that cannot be stopped: measured
             // 2026-11-09, `codecblue stop` sent SIGTERM, the log said "asked to stop (SIGTERM):
             // stopping", and the process went on sleeping for another forty seconds and then tried

@@ -586,6 +586,12 @@ public final class A2DPStreamer: @unchecked Sendable {
         var start = DispatchTime.now().uptimeNanoseconds
         var lastReport = start
         var reportsSoFar = 0
+        // The last report that was actually printed, and how many quiet ones have been skipped
+        // since. Measured 2026-11-14: the `streaming:` line was 47% of an 83 238-line log — one
+        // every two seconds, nearly all of them identical. A log is for finding things, and a line
+        // that says the same thing 39 502 times is a line that hides the one that does not.
+        var lastPrintedReport: String?
+        var quietReports = 0
         var lastProgress = start
         // The last sample of the previous block, held across an underrun instead of jumping to
         // zero. Declared here so the inner loop can reach it without allocating.
@@ -956,7 +962,8 @@ public final class A2DPStreamer: @unchecked Sendable {
                     stats: &stats, meter: &meter, queue: queue, encoder: encoder,
                     now: now, lastReport: lastReport,
                     shortReadsInWindow: shortReads, shortFramesInWindow: shortFrames,
-                    driftFraction: drift)
+                    driftFraction: drift,
+                    lastPrinted: &lastPrintedReport, quiet: &quietReports)
                 shortReads = 0
                 shortFrames = 0
                 if needsRoom {
@@ -1175,7 +1182,8 @@ public final class A2DPStreamer: @unchecked Sendable {
         stats: inout StreamStatistics, meter: inout LinkMeter, queue: PacketQueue,
         encoder: LDACEncoder, now: UInt64, lastReport: UInt64,
         shortReadsInWindow: Int = 0, shortFramesInWindow: Int = 0,
-        driftFraction: Double? = nil
+        driftFraction: Double? = nil,
+        lastPrinted: inout String?, quiet: inout Int
     ) {
         let window = max(Double(now - lastReport) / 1e9, 0.001)
         let accepted = meter.takeFraction(sampleRate: encoder.sampleRate, window: window)
@@ -1238,7 +1246,26 @@ public final class A2DPStreamer: @unchecked Sendable {
                 format: ", %d short read(s) (%d frames held: the writer is behind)",
                 shortReadsInWindow, shortFramesInWindow)
         }
-        log(line)
+        // Print it only when it says something new.
+        //
+        // The line is a snapshot of a steady state, so in a healthy stream consecutive reports
+        // differ only in the throughput's last digit. Comparing the whole line is the cheap rule
+        // that gets this right without a list of "interesting" fields to keep in step with the
+        // format: if any part of it changed — rung, queue, drops, stalls, short reads — it prints.
+        //
+        // The heartbeat is the safety net. A stream that is quiet for an hour must still say it is
+        // alive, or the log of a hang and the log of a healthy stream look the same.
+        let heartbeat = quiet >= 15  // 15 × 2 s = 30 s
+        if line != lastPrinted || heartbeat {
+            if quiet > 0 && heartbeat {
+                log("(\(quiet) report(s) unchanged in the last \(quiet * 2) s)")
+            }
+            log(line)
+            lastPrinted = line
+            quiet = 0
+        } else {
+            quiet += 1
+        }
         if stats.linkIsTheBottleneck {
             log(
                 "the link takes less audio than the codec produces: this is the Bluetooth link, not the encoder."

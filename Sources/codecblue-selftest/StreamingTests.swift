@@ -4592,3 +4592,88 @@ func framerTests() {
         check(decoded.first?.payload.isEmpty == true, "the stray byte is not payload")
     }
 }
+
+/// The log has to stay small enough to read, and most of what made it big was repetition.
+///
+/// Measured 2026-11-14: `/tmp/codecblue-agent.log` was 10 MB and 83 238 lines after 15 hours —
+/// 16 MB a day, 80 MB in five. 47% of those lines were the two-second `streaming:` report, and
+/// 1 194 were the same "headphones are not reachable" sentence while they sat in their case.
+func logVolumeTests() {
+    test("the log is rotated before it is appended to") {
+        let agent = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/Audio/LaunchAgent.swift", encoding: .utf8)
+        let body = agent ?? ""
+        check(body.contains("AgentLog.rotateIfNeeded()"), "load rotates first")
+        // Between the unload and the load, which is the only moment with no writer. The first
+        // version of this test looked for the first `unload` in the file and found the one in
+        // `remove()`, which is a different function — so it failed on a file that was right.
+        guard let loadStart = body.range(of: "public static func load() throws {"),
+            let loadEnd = body.range(of: "public static func unload() throws {")
+        else {
+            check(false, "the load function is present")
+            return
+        }
+        let load = String(body[loadStart.upperBound..<loadEnd.lowerBound])
+        guard let rotate = load.range(of: "AgentLog.rotateIfNeeded()"),
+            let unload = load.range(of: "\"unload\", plistURL.path"),
+            let reload = load.range(of: "\"load\", plistURL.path")
+        else {
+            check(false, "rotation and both launchctl calls are in load()")
+            return
+        }
+        check(unload.lowerBound < rotate.lowerBound, "after the unload: no writer")
+        check(rotate.lowerBound < reload.lowerBound, "and before the load")
+    }
+
+    test("rotation keeps one old log and only when it is large") {
+        let path = NSTemporaryDirectory() + "codecblue-log-test-\(UUID().uuidString).log"
+        let manager = FileManager.default
+        manager.createFile(atPath: path, contents: Data())
+        defer {
+            try? manager.removeItem(atPath: path)
+            try? manager.removeItem(atPath: path + ".1")
+        }
+
+        // Small: nothing happens.
+        try? Data(repeating: 0x41, count: 1024).write(to: URL(fileURLWithPath: path))
+        check(AgentLog.rotateIfNeeded(path: path) == nil, "a small log is left alone")
+        check(manager.fileExists(atPath: path), "and still there")
+
+        // Large: moved aside, and the old one replaced rather than numbered upwards.
+        try? Data(repeating: 0x42, count: AgentLog.rotateAbove + 1).write(
+            to: URL(fileURLWithPath: path))
+        let moved = AgentLog.rotateIfNeeded(path: path)
+        check(moved == path + ".1", "it moves to .1: \(moved ?? "nil")")
+        check(!manager.fileExists(atPath: path), "and the live log is gone")
+        check(manager.fileExists(atPath: path + ".1"), "the old one is kept")
+
+        // A second rotation replaces .1, it does not create .2.
+        try? Data(repeating: 0x43, count: AgentLog.rotateAbove + 1).write(
+            to: URL(fileURLWithPath: path))
+        _ = AgentLog.rotateIfNeeded(path: path)
+        check(!manager.fileExists(atPath: path + ".2"), "no pile of numbered files")
+        let size = (try? manager.attributesOfItem(atPath: path + ".1")[.size] as? Int) ?? 0
+        check(size == AgentLog.rotateAbove + 1, "and .1 holds the newest old log")
+    }
+
+    test("an unchanged report is not printed, a changed one is") {
+        // The rule is "print when the line differs", which needs no list of interesting fields to
+        // keep in step with the format.
+        let streamer = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = streamer ?? ""
+        check(body.contains("if line != lastPrinted || heartbeat"), "the comparison is the rule")
+        check(body.contains("let heartbeat = quiet >= 15"), "with a 30 s heartbeat")
+        check(body.contains("report(s) unchanged in the last"), "that says how many were skipped")
+    }
+
+    test("an unreachable headphone is said once, then every ten minutes") {
+        let source = try? String(contentsOfFile: "Sources/codecblue/main.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("unreachableAttempts == 1 ||"), "the first one always prints")
+        check(body.contains(">= 600"), "then once per ten minutes")
+        check(
+            body.contains("attempts so far"), "with the count, so the reader knows it kept trying")
+        check(body.contains("reachable again after"), "and the recovery is said too")
+    }
+}
