@@ -1064,7 +1064,27 @@ public final class A2DPStreamer: @unchecked Sendable {
                 currentBurst = burst
                 currentStalls = stallCount
                 currentOccupancy = occupancy
-                if carriedKbps > 0 {
+                // The floor is measured only on a window that lost no audio, which is what its own
+                // doc comment has always claimed and what the code did not do.
+                //
+                // Measured 2026-11-15, on a link that carries 342 kbps cleanly:
+                //
+                //     LDAC SQ does not fit this link (440 kbps carried, 9% dropped): settled on 363
+                //     LDAC 363 does not fit this link (342 kbps carried, 7% dropped): settled on 303
+                //
+                // The floor recorded the 440 — the throughput of a window that threw away 9% of the
+                // audio — and then `codecblue levels` answered "363 fits (440 available)" while the
+                // stream fell back to 303 eight seconds later. The ladder was promising a rung the
+                // link had just refused, because the number it was reading described an attempt
+                // that failed rather than a delivery that worked.
+                //
+                // A window that dropped is evidence about what the link *cannot* do, and that is
+                // the ceiling's job. The floor is the other direction, and it may only be raised by
+                // a window that kept up.
+                //
+                // The threshold is the ceiling's, deliberately: both numbers answer "what does this
+                // link carry without losing audio", so they must agree on what losing audio means.
+                if carriedKbps > 0, dropped <= 0.02 {
                     currentFloorKbps = max(currentFloorKbps, carriedKbps)
                     // The ceiling expires when the floor passes it.
                     //

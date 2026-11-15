@@ -4855,3 +4855,70 @@ func ceilingExpiryTests() {
         check(body.contains("streamer.ceilingAge ?? 0"), "read from the stream")
     }
 }
+
+/// The floor may only be raised by a window that kept up.
+///
+/// Its own doc comment has always said "the most the link has carried in a window that dropped
+/// nothing", and the code did not check. Measured 2026-11-15, on a link that carries 342 kbps
+/// cleanly:
+///
+///     LDAC SQ does not fit this link (440 kbps carried, 9% dropped): settled on 363
+///     LDAC 363 does not fit this link (342 kbps carried, 7% dropped): settled on 303
+///
+/// The floor recorded the 440 — the throughput of a window that threw away 9% of the audio — and
+/// `codecblue levels` then answered "363 fits (440 available)" while the stream fell back to 303
+/// eight seconds later. The ladder was promising a rung the link had just refused.
+///
+/// A window that dropped is evidence about what the link *cannot* do, and that is the ceiling's
+/// job. The floor is the other direction.
+func floorOnlyFromCleanWindowsTests() {
+    /// The rule, in the same shape as the stream's.
+    func afterWindow(floor: Double, carried: Double, dropped: Double) -> Double {
+        var f = floor
+        if carried > 0, dropped <= 0.02 { f = max(f, carried) }
+        return f
+    }
+
+    test("a window that dropped does not raise the floor") {
+        // The exact numbers from the report.
+        let f = afterWindow(floor: 0, carried: 440, dropped: 0.09)
+        check(f == 0, "440 carried with 9% dropped is not a floor")
+        let clean = afterWindow(floor: 0, carried: 342, dropped: 0.0)
+        check(clean == 342, "342 carried with nothing dropped is")
+    }
+
+    test("the floor keeps the best clean window") {
+        var f = afterWindow(floor: 0, carried: 342, dropped: 0)
+        f = afterWindow(floor: f, carried: 440, dropped: 0.09)
+        check(f == 342, "the dropping window is ignored")
+        f = afterWindow(floor: f, carried: 400, dropped: 0)
+        check(f == 400, "a better clean window raises it")
+        f = afterWindow(floor: f, carried: 350, dropped: 0)
+        check(f == 400, "a worse clean window does not lower it")
+    }
+
+    test("the threshold is the ceiling's, so the two agree on what losing audio means") {
+        // Both numbers answer "what does this link carry without losing audio". If they disagreed
+        // about the threshold, a window could raise one and lower the other.
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("if carriedKbps > 0, dropped <= 0.02 {"), "the floor's test")
+        check(body.contains("if dropped > 0.02 {"), "the ceiling's test")
+        check(body.contains("0.02"), "one threshold, written twice, the same number")
+    }
+
+    test("silence raises nothing") {
+        check(
+            afterWindow(floor: 342, carried: 0, dropped: 0) == 342, "nothing sent, nothing measured"
+        )
+    }
+
+    test("the doc comment and the code now say the same thing") {
+        let source = try? String(
+            contentsOfFile: "Sources/CodecBlueCore/AVDTP/A2DPStreamer.swift", encoding: .utf8)
+        let body = source ?? ""
+        check(body.contains("in a window that dropped nothing"), "the comment")
+        check(body.contains("dropped <= 0.02"), "and the code that finally honours it")
+    }
+}
